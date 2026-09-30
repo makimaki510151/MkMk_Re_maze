@@ -10,6 +10,7 @@ import {
   mulberry32,
   countJunctions,
   shortestPathLength,
+  isPerfectMaze,
 } from '../js/maze.js';
 import {
   createGame,
@@ -91,6 +92,15 @@ describe('maze generation', () => {
       const manhattan = (m.size - 1) * 2;
       assert.ok(junctions >= 80, `junctions ${junctions} seed=${seed}`);
       assert.ok(dist >= Math.floor(manhattan * 1.15), `dist ${dist} vs manhattan ${manhattan} seed=${seed}`);
+    }
+  });
+
+  it('never creates loops (perfect maze / tree)', () => {
+    for (const seed of [1, 5, 9, 42, 100, 999]) {
+      for (const size of [21, 45, 55]) {
+        const m = generateMaze(size, seed);
+        assert.equal(isPerfectMaze(m.grid), true, `loop detected size=${size} seed=${seed}`);
+      }
     }
   });
 });
