@@ -8,6 +8,8 @@ import {
   PATH,
   WALL,
   mulberry32,
+  countJunctions,
+  shortestPathLength,
 } from '../js/maze.js';
 import {
   createGame,
@@ -78,6 +80,18 @@ describe('maze generation', () => {
     const vals = [r(), r(), r()];
     const r2 = mulberry32(123);
     assert.deepEqual([r2(), r2(), r2()], vals);
+  });
+
+  it('has many junctions and a winding route to goal', () => {
+    const seeds = [3, 11, 42, 77, 202];
+    for (const seed of seeds) {
+      const m = generateMaze(45, seed);
+      const junctions = countJunctions(m.grid);
+      const dist = shortestPathLength(m.grid, m.start, m.goal);
+      const manhattan = (m.size - 1) * 2;
+      assert.ok(junctions >= 80, `junctions ${junctions} seed=${seed}`);
+      assert.ok(dist >= Math.floor(manhattan * 1.15), `dist ${dist} vs manhattan ${manhattan} seed=${seed}`);
+    }
   });
 });
 
