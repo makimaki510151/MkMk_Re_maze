@@ -1,7 +1,7 @@
 /** MkMk Re Maze — キーボード / ゲームパッド / タッチ入力 */
 
-const STICK_DEADZONE = 0.45;
-const STICK_RELEASE = 0.28;
+const STICK_DEADZONE = 0.55;
+const STICK_RELEASE = 0.35;
 
 /**
  * @param {{
@@ -56,6 +56,11 @@ export function createInput(opts) {
     if (!dir) return;
     e.preventDefault();
     keysDown.add(e.key.toLowerCase());
+    // OS キーリピートは無視（単押しが複数マス進むのを防ぐ）
+    if (e.repeat) {
+      syncHold();
+      return;
+    }
     emit(dir);
   }
 
@@ -77,7 +82,7 @@ export function createInput(opts) {
       const press = () => {
         const now = performance.now();
         // pointer + touch の二重発火を抑制
-        if (now - lastPressAt < 40) return;
+        if (now - lastPressAt < 80) return;
         lastPressAt = now;
         dpadDir = dir;
         btn.classList.add('active');

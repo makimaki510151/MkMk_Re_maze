@@ -14,6 +14,8 @@ import {
   SINGLE_SIZE,
   DEFAULT_ONLINE_SIZE,
   MOVE_COOLDOWN_MS,
+  MOVE_REPEAT_DELAY_MS,
+  MOVE_REPEAT_RATE_MS,
 } from './game.js';
 import { generateMaze, PATH } from './maze.js';
 import { createNet } from './net.js';
@@ -37,6 +39,9 @@ const app = {
   raf: 0,
   lastMoveAt: 0,
   pendingDir: null,
+  holdDir: null,
+  holdStartedAt: 0,
+  stepsThisHold: 0,
   holdActive: false,
   resultShown: false,
   unbindTouch: [],
@@ -412,9 +417,18 @@ function startLoop() {
   cancelAnimationFrame(app.raf);
   const tick = () => {
     if (!app.game) return;
-    // ゲームパッド／押しっぱなしを毎フレーム同期
+    // ゲームパッド／押しっぱなしを毎フレーム同期（方向変化時のみホールドをリセット）
     const heldDir = app.input?.tick?.();
-    if (heldDir) app.pendingDir = heldDir;
+    if (heldDir) {
+      if (heldDir !== app.holdDir) {
+        app.holdDir = heldDir;
+        app.holdStartedAt = performance.now();
+        app.stepsThisHold = 0;
+      }
+      app.pendingDir = heldDir;
+    } else if (!app.input?.isHeld?.()) {
+      app.holdDir = null;
+    }
     processPendingMove();
     $('#hud-timer').textContent = formatTime(elapsedMs(app.game));
     app.renderer?.draw(app.game, app.localSeat);
@@ -469,28 +483,54 @@ function updateRoster() {
 
 function requestMove(dir) {
   if (!app.game || app.game.phase !== 'playing') return;
+  if (dir !== app.holdDir) {
+    app.holdDir = dir;
+    app.holdStartedAt = performance.now();
+    app.stepsThisHold = 0;
+  }
   app.pendingDir = dir;
 }
 
 function processPendingMove() {
   if (!app.pendingDir || !app.game) return;
   const now = performance.now();
-  if (now - app.lastMoveAt < MOVE_COOLDOWN_MS) return;
   const dir = app.pendingDir;
+  const held = !!app.input?.isHeld?.();
 
-  // 押しっぱなしでなければ1回で消費
-  if (!app.input?.isHeld?.()) {
+  // 単押しは1マスのみ。連移は長押し後にゆっくり
+  if (app.stepsThisHold === 0) {
+    if (now - app.lastMoveAt < 50) return;
+  } else if (held && app.holdDir === dir) {
+    const elapsed = now - app.holdStartedAt;
+    const need = MOVE_REPEAT_DELAY_MS + (app.stepsThisHold - 1) * MOVE_REPEAT_RATE_MS;
+    if (elapsed < need) return;
+    if (now - app.lastMoveAt < MOVE_COOLDOWN_MS) return;
+  } else {
     app.pendingDir = null;
+    return;
   }
 
   if (app.mode === 'guest') {
     app.net?.sendToHost({ type: 'move', dir, peerId: app.net.peerId });
     app.lastMoveAt = now;
+    app.stepsThisHold += 1;
+    if (!held) {
+      app.pendingDir = null;
+      app.holdDir = null;
+    }
     return;
   }
 
   const result = tryMove(app.game, app.localSeat, dir, now);
+  if (result.reason === 'cooldown') return;
+
+  // 壁ヒットも1操作として数え、単押しが連打扱いになるのを防ぐ
   app.lastMoveAt = now;
+  app.stepsThisHold += 1;
+  if (!held) {
+    app.pendingDir = null;
+    app.holdDir = null;
+  }
   if (result.ok) {
     if (app.mode === 'host') syncDelta(result.opened);
     if (result.finished && !app.resultShown) showResult();
@@ -508,8 +548,8 @@ function bindControls() {
 
   app.unbindTouch = [
     app.input.bindDpad($('#dpad')),
-    app.input.bindSwipeSurface($('#overview-wrap'), 24),
-    app.input.bindSwipeSurface($('#local-wrap'), 20),
+    app.input.bindSwipeSurface($('#overview-wrap'), 36),
+    app.input.bindSwipeSurface($('#local-wrap'), 32),
   ];
 
   $('#btn-quit').onclick = () => quitToTitle();
@@ -533,6 +573,8 @@ function quitToTitle() {
   app.game = null;
   app.resultShown = false;
   app.pendingDir = null;
+  app.holdDir = null;
+  app.stepsThisHold = 0;
   document.body.classList.remove('playing');
   const box = $('#touch-controls');
   if (box) box.hidden = true;
