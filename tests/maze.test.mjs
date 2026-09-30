@@ -60,7 +60,7 @@ describe('maze generation', () => {
     assert.deepEqual([r2(), r2(), r2()], vals);
   });
 
-  it('is a single main road with many dead-end forks (no loops)', () => {
+  it('Prim maze is perfect with many dead-end forks (no loops)', () => {
     for (const seed of [3, 11, 42, 77, 202]) {
       const m = generateMaze(45, seed);
       assert.equal(isPerfectMaze(m.grid), true, `loop seed=${seed}`);
@@ -69,8 +69,8 @@ describe('maze generation', () => {
       const spineBranches = countSpineBranches(m.grid, m.start, m.goal);
       assert.ok(spineBranches >= 14, `spineBranches ${spineBranches} seed=${seed}`);
       const junctions = countJunctions(m.grid);
-      // 枝の再分岐も含め、本線分岐より全体ジャンクションが多い
-      assert.ok(junctions >= 20, `junctions ${junctions} seed=${seed}`);
+      // Prim は奇数セル全域を掘るので分岐が多く、本線分岐より全体ジャンクションが多い
+      assert.ok(junctions >= 80, `junctions ${junctions} seed=${seed}`);
       assert.ok(junctions >= spineBranches, `junctions ${junctions} < spine ${spineBranches}`);
     }
   });

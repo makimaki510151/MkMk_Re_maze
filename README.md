@@ -49,4 +49,4 @@ node --test tests/*.test.mjs
 - 純フロントエンド（ES Modules）
 - 描画: Canvas 2D
 - 通信: [PeerJS](https://peerjs.com/)（WebRTC DataChannel、ホスト権威の状態同期）
-- 迷路: 本線（スタート→ゴール）＋行き止まり分岐。ループなし／孤立壁なし
+- 迷路: Randomized Prim（完璧迷路＝ループなし・スタート→ゴールは一意）。孤立壁なし
