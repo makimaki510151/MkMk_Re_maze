@@ -18,6 +18,7 @@ import {
 import { generateMaze, PATH } from './maze.js';
 import { createNet } from './net.js';
 import { createRenderer } from './render.js';
+import { createInput, prefersTouchUI } from './input.js';
 
 const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => [...document.querySelectorAll(sel)];
@@ -32,11 +33,13 @@ const app = {
   localName: 'プレイヤー',
   lobbyPlayers: [],
   renderer: null,
+  input: null,
   raf: 0,
   lastMoveAt: 0,
-  keysDown: new Set(),
   pendingDir: null,
+  holdActive: false,
   resultShown: false,
+  unbindTouch: [],
 };
 
 function showScreen(id) {
@@ -385,31 +388,70 @@ function syncDelta(opened = []) {
 
 function enterGame() {
   showScreen('screen-game');
+  document.body.classList.add('playing');
   $('#hud-mode').textContent = app.mode === 'single' ? 'SINGLE' : 'ONLINE';
   $('#hud-size').textContent = `${app.game.maze.size}×${app.game.maze.size}`;
+  refreshTouchChrome();
 
   if (!app.renderer) {
     app.renderer = createRenderer($('#canvas-overview'), $('#canvas-local'));
-    window.addEventListener('resize', () => app.renderer?.resize());
+    window.addEventListener('resize', onResize);
+    window.addEventListener('orientationchange', () => setTimeout(onResize, 200));
   }
-  app.renderer.resize();
+  onResize();
   updateRoster();
   startLoop();
   saveRejoinSession();
+}
+
+function onResize() {
+  app.renderer?.resize();
+  refreshTouchChrome();
+}
+
+function refreshTouchChrome() {
+  const touch = prefersTouchUI() || window.innerWidth <= 900;
+  const box = $('#touch-controls');
+  if (box) box.hidden = !touch || !$('#screen-game')?.classList.contains('active');
+  document.body.classList.toggle('touch-ui', touch);
 }
 
 function startLoop() {
   cancelAnimationFrame(app.raf);
   const tick = () => {
     if (!app.game) return;
+    // ゲームパッド／押しっぱなしを毎フレーム同期
+    const heldDir = app.input?.tick?.();
+    if (heldDir) app.pendingDir = heldDir;
     processPendingMove();
     $('#hud-timer').textContent = formatTime(elapsedMs(app.game));
     app.renderer?.draw(app.game, app.localSeat);
     updateRoster();
+    updateInputBadge();
+    const me = app.game.players[app.localSeat];
+    if (me) {
+      const screen = $('#screen-game');
+      if (screen) {
+        screen.dataset.px = String(me.x);
+        screen.dataset.py = String(me.y);
+      }
+    }
     if (app.game.phase === 'finished' && !app.resultShown) showResult();
     app.raf = requestAnimationFrame(tick);
   };
   app.raf = requestAnimationFrame(tick);
+}
+
+function updateInputBadge() {
+  const el = $('#input-badge');
+  if (!el) return;
+  const n = app.input?.padCount || 0;
+  if (n > 0) {
+    el.hidden = false;
+    el.textContent = 'コントローラー接続中';
+  } else {
+    el.hidden = true;
+  }
 }
 
 function updateRoster() {
@@ -443,8 +485,9 @@ function processPendingMove() {
   const now = performance.now();
   if (now - app.lastMoveAt < MOVE_COOLDOWN_MS) return;
   const dir = app.pendingDir;
-  // キー押しっぱなしなら維持、単発なら消費
-  if (![...app.keysDown].some((k) => keyToDir(k) === dir) && !app.dpadHeld) {
+
+  // 押しっぱなしでなければ1回で消費
+  if (!app.input?.isHeld?.()) {
     app.pendingDir = null;
   }
 
@@ -454,7 +497,6 @@ function processPendingMove() {
     return;
   }
 
-  // single or host
   const result = tryMove(app.game, app.localSeat, dir, now);
   app.lastMoveAt = now;
   if (result.ok) {
@@ -463,53 +505,45 @@ function processPendingMove() {
   }
 }
 
-function keyToDir(key) {
-  const k = key.toLowerCase();
-  if (k === 'arrowup' || k === 'w') return 'up';
-  if (k === 'arrowdown' || k === 's') return 'down';
-  if (k === 'arrowleft' || k === 'a') return 'left';
-  if (k === 'arrowright' || k === 'd') return 'right';
-  return null;
-}
-
 function bindControls() {
-  window.addEventListener('keydown', (e) => {
-    const dir = keyToDir(e.key);
-    if (!dir) return;
-    if (['INPUT', 'TEXTAREA'].includes(e.target?.tagName)) return;
-    e.preventDefault();
-    app.keysDown.add(e.key.toLowerCase());
-    requestMove(dir);
-  });
-  window.addEventListener('keyup', (e) => {
-    app.keysDown.delete(e.key.toLowerCase());
+  app.input = createInput({
+    onMove: (dir) => requestMove(dir),
+    onHoldChange: (held) => {
+      app.holdActive = held;
+    },
+    isTypingTarget: (el) => ['INPUT', 'TEXTAREA'].includes(el?.tagName),
   });
 
-  app.dpadHeld = false;
-  $$('#dpad .dpad-btn').forEach((btn) => {
-    const dir = btn.dataset.dir;
-    const start = (e) => {
-      e.preventDefault();
-      app.dpadHeld = true;
-      requestMove(dir);
-    };
-    const end = () => {
-      app.dpadHeld = false;
-      app.pendingDir = null;
-    };
-    btn.addEventListener('pointerdown', start);
-    btn.addEventListener('pointerup', end);
-    btn.addEventListener('pointerleave', end);
-    btn.addEventListener('pointercancel', end);
-  });
+  app.unbindTouch = [
+    app.input.bindDpad($('#dpad')),
+    app.input.bindSwipeSurface($('#overview-wrap'), 24),
+    app.input.bindSwipeSurface($('#local-wrap'), 20),
+  ];
 
   $('#btn-quit').onclick = () => quitToTitle();
+
+  // タッチUIの初期判定
+  refreshTouchChrome();
+  window.addEventListener('resize', refreshTouchChrome);
+
+  // iOS のダブルタップズーム抑制（ゲーム中）
+  document.addEventListener(
+    'gesturestart',
+    (e) => {
+      if (document.body.classList.contains('playing')) e.preventDefault();
+    },
+    { passive: false },
+  );
 }
 
 function quitToTitle() {
   cancelAnimationFrame(app.raf);
   app.game = null;
   app.resultShown = false;
+  app.pendingDir = null;
+  document.body.classList.remove('playing');
+  const box = $('#touch-controls');
+  if (box) box.hidden = true;
   if (app.mode === 'host' || app.mode === 'guest') {
     app.net?.destroy();
     app.net = null;
@@ -521,6 +555,9 @@ function quitToTitle() {
 function showResult() {
   if (!app.game || app.resultShown) return;
   app.resultShown = true;
+  document.body.classList.remove('playing');
+  const box = $('#touch-controls');
+  if (box) box.hidden = true;
   showScreen('screen-result');
 
   const winner = app.game.players[app.game.winnerId];
