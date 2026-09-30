@@ -17,10 +17,18 @@ import {
   MOVE_REPEAT_DELAY_MS,
   MOVE_REPEAT_RATE_MS,
 } from './game.js';
-import { generateMaze, PATH } from './maze.js';
+import { generateMaze, PATH, isPassable } from './maze.js';
 import { createNet } from './net.js';
 import { createRenderer } from './render.js';
 import { createInput, prefersTouchUI } from './input.js';
+import { bindAudioUnlock, ensureAudio, playSound } from './audio.js';
+
+const MOVE_DELTA = {
+  up: { x: 0, y: -1 },
+  down: { x: 0, y: 1 },
+  left: { x: -1, y: 0 },
+  right: { x: 1, y: 0 },
+};
 
 const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => [...document.querySelectorAll(sel)];
@@ -125,13 +133,30 @@ function paintTitleMaze() {
 /* ===== Screens ===== */
 function bindTitle() {
   $('#btn-single').onclick = () => {
+    ensureAudio();
+    playSound('ui');
     app.mode = 'single';
     startSingle();
   };
-  $('#btn-host').onclick = () => openLobby('host');
-  $('#btn-join').onclick = () => openLobby('guest');
-  $('#btn-howto').onclick = () => showScreen('screen-howto');
-  $('#btn-howto-back').onclick = () => showScreen('screen-title');
+  $('#btn-host').onclick = () => {
+    ensureAudio();
+    playSound('ui');
+    openLobby('host');
+  };
+  $('#btn-join').onclick = () => {
+    ensureAudio();
+    playSound('ui');
+    openLobby('guest');
+  };
+  $('#btn-howto').onclick = () => {
+    ensureAudio();
+    playSound('ui');
+    showScreen('screen-howto');
+  };
+  $('#btn-howto-back').onclick = () => {
+    playSound('ui');
+    showScreen('screen-title');
+  };
 }
 
 function startSingle() {
@@ -162,12 +187,15 @@ async function openLobby(role) {
   setStatus(role === 'host' ? '「接続」で部屋を開きます' : '部屋コードを入れて「接続」');
 
   $('#btn-lobby-back').onclick = () => {
+    playSound('ui');
     app.net?.destroy();
     app.net = null;
     showScreen('screen-title');
   };
 
   $('#btn-lobby-connect').onclick = async () => {
+    ensureAudio();
+    playSound('ui');
     try {
       const name = $('#lobby-name').value.trim() || 'プレイヤー';
       app.localName = name;
@@ -206,6 +234,8 @@ async function openLobby(role) {
 
   $('#btn-lobby-start').onclick = () => {
     if (app.mode !== 'host') return;
+    ensureAudio();
+    playSound('ui');
     if (app.lobbyPlayers.length < 1) return toast('プレイヤーがいません');
     let size = Number($('#lobby-size').value) || DEFAULT_ONLINE_SIZE;
     if (size % 2 === 0) size += 1;
@@ -384,6 +414,8 @@ function syncDelta(opened = []) {
 }
 
 function enterGame() {
+  ensureAudio();
+  playSound('start');
   showScreen('screen-game');
   document.body.classList.add('playing');
   $('#hud-mode').textContent = app.mode === 'single' ? 'SINGLE' : 'ONLINE';
@@ -511,6 +543,7 @@ function processPendingMove() {
   }
 
   if (app.mode === 'guest') {
+    playLocalMoveSe(dir);
     app.net?.sendToHost({ type: 'move', dir, peerId: app.net.peerId });
     app.lastMoveAt = now;
     app.stepsThisHold += 1;
@@ -531,10 +564,30 @@ function processPendingMove() {
     app.pendingDir = null;
     app.holdDir = null;
   }
+  playMoveResultSe(result);
   if (result.ok) {
     if (app.mode === 'host') syncDelta(result.opened);
     if (result.finished && !app.resultShown) showResult();
   }
+}
+
+/** ゲスト向け：ローカル予測で移動／壁SE */
+function playLocalMoveSe(dir) {
+  ensureAudio();
+  const me = app.game?.players[app.localSeat];
+  const d = MOVE_DELTA[dir];
+  if (!me || !d) return;
+  if (!isPassable(app.game.maze.grid, me.x + d.x, me.y + d.y)) {
+    playSound('hit');
+  } else {
+    playSound('move');
+  }
+}
+
+function playMoveResultSe(result) {
+  ensureAudio();
+  if (result?.ok) playSound('move');
+  else if (result?.reason === 'wall') playSound('hit');
 }
 
 function bindControls() {
@@ -552,7 +605,10 @@ function bindControls() {
     app.input.bindSwipeSurface($('#local-wrap'), 32),
   ];
 
-  $('#btn-quit').onclick = () => quitToTitle();
+  $('#btn-quit').onclick = () => {
+    playSound('ui');
+    quitToTitle();
+  };
 
   // タッチUIの初期判定
   refreshTouchChrome();
@@ -589,6 +645,8 @@ function quitToTitle() {
 function showResult() {
   if (!app.game || app.resultShown) return;
   app.resultShown = true;
+  ensureAudio();
+  playSound('clear');
   document.body.classList.remove('playing');
   const box = $('#touch-controls');
   if (box) box.hidden = true;
@@ -627,6 +685,8 @@ function showResult() {
   }
 
   $('#btn-result-again').onclick = () => {
+    ensureAudio();
+    playSound('ui');
     if (app.mode === 'single') {
       startSingle();
     } else if (app.mode === 'host') {
@@ -650,7 +710,10 @@ function showResult() {
       showScreen('screen-game');
     }
   };
-  $('#btn-result-title').onclick = () => quitToTitle();
+  $('#btn-result-title').onclick = () => {
+    playSound('ui');
+    quitToTitle();
+  };
 }
 
 function saveBestTime(ms) {
@@ -679,6 +742,7 @@ function readBestTime() {
 }
 
 function init() {
+  bindAudioUnlock();
   paintTitleMaze();
   bindTitle();
   bindControls();
