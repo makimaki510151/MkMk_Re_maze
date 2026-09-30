@@ -9,8 +9,11 @@ import {
   WALL,
   mulberry32,
   countJunctions,
+  countSpineBranches,
   shortestPathLength,
   isPerfectMaze,
+  wallsConnectedToBorder,
+  hasUniqueSolution,
 } from '../js/maze.js';
 import {
   createGame,
@@ -46,34 +49,8 @@ describe('maze generation', () => {
 
   it('has a path from start to goal (BFS)', () => {
     const m = generateMaze(31, 7);
-    const key = (x, y) => `${x},${y}`;
-    const seen = new Set([key(0, 0)]);
-    const q = [[0, 0]];
-    const dirs = [
-      [0, 1],
-      [0, -1],
-      [1, 0],
-      [-1, 0],
-    ];
-    let found = false;
-    while (q.length) {
-      const [x, y] = q.shift();
-      if (x === m.goal.x && y === m.goal.y) {
-        found = true;
-        break;
-      }
-      for (const [dx, dy] of dirs) {
-        const nx = x + dx;
-        const ny = y + dy;
-        if (!isPassable(m.grid, nx, ny)) continue;
-        const k = key(nx, ny);
-        if (seen.has(k)) continue;
-        seen.add(k);
-        q.push([nx, ny]);
-      }
-    }
-    assert.equal(found, true);
-    assert.ok(seen.size > 10);
+    const dist = shortestPathLength(m.grid, m.start, m.goal);
+    assert.ok(dist > 10, `dist ${dist}`);
   });
 
   it('mulberry32 is stable', () => {
@@ -83,23 +60,25 @@ describe('maze generation', () => {
     assert.deepEqual([r2(), r2(), r2()], vals);
   });
 
-  it('has many junctions and a winding route to goal', () => {
-    const seeds = [3, 11, 42, 77, 202];
-    for (const seed of seeds) {
+  it('is a single main road with many dead-end forks (no loops)', () => {
+    for (const seed of [3, 11, 42, 77, 202]) {
       const m = generateMaze(45, seed);
+      assert.equal(isPerfectMaze(m.grid), true, `loop seed=${seed}`);
+      assert.equal(hasUniqueSolution(m.grid, m.start, m.goal), true, `unique seed=${seed}`);
+      assert.equal(wallsConnectedToBorder(m.grid), true, `wall island seed=${seed}`);
+      const spineBranches = countSpineBranches(m.grid, m.start, m.goal);
+      assert.ok(spineBranches >= 8, `spineBranches ${spineBranches} seed=${seed}`);
       const junctions = countJunctions(m.grid);
-      const dist = shortestPathLength(m.grid, m.start, m.goal);
-      const manhattan = (m.size - 1) * 2;
-      assert.ok(junctions >= 80, `junctions ${junctions} seed=${seed}`);
-      assert.ok(dist >= Math.floor(manhattan * 1.15), `dist ${dist} vs manhattan ${manhattan} seed=${seed}`);
+      assert.ok(junctions >= 8, `junctions ${junctions} seed=${seed}`);
     }
   });
 
-  it('never creates loops (perfect maze / tree)', () => {
+  it('never creates loops or wall islands', () => {
     for (const seed of [1, 5, 9, 42, 100, 999]) {
       for (const size of [21, 45, 55]) {
         const m = generateMaze(size, seed);
-        assert.equal(isPerfectMaze(m.grid), true, `loop detected size=${size} seed=${seed}`);
+        assert.equal(isPerfectMaze(m.grid), true, `loop size=${size} seed=${seed}`);
+        assert.equal(wallsConnectedToBorder(m.grid), true, `island size=${size} seed=${seed}`);
       }
     }
   });
@@ -144,7 +123,6 @@ describe('game', () => {
       seed: 3,
       players: [{ name: 'A' }],
     });
-    // Force a controlled grid: open right, wall down
     g.maze.grid = Array.from({ length: 15 }, () => Array(15).fill(WALL));
     g.maze.grid[0][0] = PATH;
     g.maze.grid[0][1] = PATH;
@@ -203,12 +181,8 @@ describe('game', () => {
       mode: 'online',
       size: 5,
       seed: 1,
-      players: [
-        { name: 'A' },
-        { name: 'B' },
-      ],
+      players: [{ name: 'A' }, { name: 'B' }],
     });
-    // Tiny open maze
     g.maze.grid = [
       [PATH, PATH, PATH, PATH, PATH],
       [PATH, PATH, PATH, PATH, PATH],

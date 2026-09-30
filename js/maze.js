@@ -1,21 +1,28 @@
-/** MkMk Re Maze — 迷路生成・マスク */
+/** MkMk Re Maze — 迷路生成・マスク
+ *
+ * 構造:
+ * - スタート→ゴールは一本の本線（spine）
+ * - 本線から多くの分かれ道（spur）を生やす
+ * - 分かれ道はすべて行き止まり（惜しい偽路 / 遠くの行き止まり）
+ * - 通路グラフは木（ループなし）
+ * - 壁は外周まで連結（孤立壁なし）
+ */
 
 export const PATH = 0;
 export const WALL = 1;
 
+const ORTHO = [
+  [0, 1],
+  [0, -1],
+  [1, 0],
+  [-1, 0],
+];
 const STEP_DIRS = [
   [0, -2],
   [0, 2],
   [-2, 0],
   [2, 0],
 ];
-
-/** Growing Tree: ランダム選択比率（高いほど分岐が多くなる。ループは作らない） */
-const RANDOM_ACTIVE = 0.88;
-/** ゴールに近づく掘削を抑える重み */
-const AWAY_FROM_GOAL_WEIGHT = 3.6;
-/** 最短路が短すぎるときの再生成上限 */
-const MAX_REGEN = 14;
 
 /** 決定的 RNG（Mulberry32） */
 export function mulberry32(seed) {
@@ -29,140 +36,367 @@ export function mulberry32(seed) {
   };
 }
 
-function inCarveBounds(n, x, y) {
-  return x > 0 && y > 0 && x < n - 1 && y < n - 1;
+function key(x, y) {
+  return `${x},${y}`;
 }
 
-function unvisitedNeighbors(grid, n, x, y) {
-  const out = [];
-  for (const [dx, dy] of STEP_DIRS) {
-    const nx = x + dx;
-    const ny = y + dy;
-    if (inCarveBounds(n, nx, ny) && grid[ny][nx] === WALL) {
-      out.push({ dx, dy, nx, ny });
-    }
+function parseKey(k) {
+  const [x, y] = k.split(',').map(Number);
+  return { x, y };
+}
+
+function inOddBounds(n, x, y) {
+  return x > 0 && y > 0 && x < n - 1 && y < n - 1 && x % 2 === 1 && y % 2 === 1;
+}
+
+function shuffle(arr, rand) {
+  const a = [...arr];
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(rand() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
   }
-  return out;
+  return a;
 }
 
 function manhattan(x, y, gx, gy) {
   return Math.abs(gx - x) + Math.abs(gy - y);
 }
 
-/**
- * 分岐先を選ぶ。ゴールへ直進しにくい方向を優先しつつ乱択。
- */
-function pickConfusingNeighbor(neighbors, x, y, goal, rand) {
-  if (neighbors.length === 1) return neighbors[0];
-
-  let total = 0;
-  const weights = neighbors.map((d) => {
-    const before = manhattan(x, y, goal.x, goal.y);
-    const after = manhattan(d.nx, d.ny, goal.x, goal.y);
-    // ゴールから遠ざかる／横に逸れるほど重い
-    let w = 1;
-    if (after > before) w = AWAY_FROM_GOAL_WEIGHT;
-    else if (after === before) w = AWAY_FROM_GOAL_WEIGHT * 0.75;
-    else w = 1;
-    // わずかにノイズ
-    w *= 0.85 + rand() * 0.3;
-    total += w;
-    return w;
-  });
-
-  let r = rand() * total;
-  for (let i = 0; i < neighbors.length; i++) {
-    r -= weights[i];
-    if (r <= 0) return neighbors[i];
+function oddNeighbors(n, x, y) {
+  const out = [];
+  for (const [dx, dy] of STEP_DIRS) {
+    const nx = x + dx;
+    const ny = y + dy;
+    if (inOddBounds(n, nx, ny)) out.push({ x: nx, y: ny, dx, dy });
   }
-  return neighbors[neighbors.length - 1];
+  return out;
 }
 
-function carveGrowingTree(grid, n, rand, startX, startY, goal) {
-  for (let y = 0; y < n; y++) grid[y].fill(WALL);
-  grid[startY][startX] = PATH;
-  const active = [{ x: startX, y: startY }];
+function carveLink(grid, x1, y1, x2, y2) {
+  grid[y1][x1] = PATH;
+  grid[y2][x2] = PATH;
+  grid[(y1 + y2) / 2][(x1 + x2) / 2] = PATH;
+}
 
-  while (active.length) {
-    const idx =
-      rand() < RANDOM_ACTIVE
-        ? Math.floor(rand() * active.length)
-        : active.length - 1;
-    const { x, y } = active[idx];
-    const neighbors = unvisitedNeighbors(grid, n, x, y);
-    if (!neighbors.length) {
-      active.splice(idx, 1);
+/**
+ * スタート近く→ゴール近くの長い本線（自己回避ウォーク＋終盤はゴールへ）
+ */
+function buildSpine(n, rand) {
+  const sx = 1;
+  const sy = 1;
+  const gx = n - 2;
+  const gy = n - 2;
+  const oddCount = ((n - 1) / 2) ** 2;
+  const minLen = Math.max(8, Math.floor(oddCount * 0.28));
+
+  const path = [{ x: sx, y: sy }];
+  const onPath = new Set([key(sx, sy)]);
+  let x = sx;
+  let y = sy;
+  let guard = oddCount * 20;
+
+  while ((x !== gx || y !== gy) && guard-- > 0) {
+    const free = oddNeighbors(n, x, y).filter((c) => !onPath.has(key(c.x, c.y)));
+    if (!free.length) {
+      if (path.length <= 1) break;
+      path.pop();
+      onPath.clear();
+      for (const p of path) onPath.add(key(p.x, p.y));
+      const last = path[path.length - 1];
+      x = last.x;
+      y = last.y;
       continue;
     }
-    const chosen = pickConfusingNeighbor(neighbors, x, y, goal, rand);
-    grid[y + chosen.dy / 2][x + chosen.dx / 2] = PATH;
-    grid[chosen.ny][chosen.nx] = PATH;
-    active.push({ x: chosen.nx, y: chosen.ny });
+
+    const seekGoal = path.length >= minLen || free.every((c) => {
+      // 行き場がなくゴール方向しかない場合
+      return manhattan(c.x, c.y, gx, gy) < manhattan(x, y, gx, gy);
+    });
+
+    let total = 0;
+    const weights = free.map((c) => {
+      const before = manhattan(x, y, gx, gy);
+      const after = manhattan(c.x, c.y, gx, gy);
+      let w;
+      if (seekGoal) {
+        w = after < before ? 4.5 : after === before ? 1.2 : 0.35;
+      } else {
+        w = after > before ? 3.8 : after === before ? 1.6 : 0.45;
+      }
+      // 直進ボーナス
+      if (path.length >= 2) {
+        const prev = path[path.length - 2];
+        const pdx = x - prev.x;
+        const pdy = y - prev.y;
+        if (c.x - x === pdx && c.y - y === pdy) w *= 1.35;
+      }
+      w *= 0.85 + rand() * 0.3;
+      total += w;
+      return w;
+    });
+
+    let r = rand() * total;
+    let chosen = free[free.length - 1];
+    for (let i = 0; i < free.length; i++) {
+      r -= weights[i];
+      if (r <= 0) {
+        chosen = free[i];
+        break;
+      }
+    }
+
+    path.push({ x: chosen.x, y: chosen.y });
+    onPath.add(key(chosen.x, chosen.y));
+    x = chosen.x;
+    y = chosen.y;
   }
+
+  // ゴール未達なら、到達可能な位置まで本線を戻してから未使用セルで接続
+  if (x !== gx || y !== gy) {
+    while (path.length > 1) {
+      const probe = new Set(onPath);
+      const rest = shortestOddPath(n, x, y, gx, gy, probe);
+      const ok =
+        rest.length &&
+        rest.every((p, i) => {
+          if (onPath.has(key(p.x, p.y))) return false;
+          const prev = i === 0 ? { x, y } : rest[i - 1];
+          return Math.abs(p.x - prev.x) + Math.abs(p.y - prev.y) === 2;
+        });
+      if (ok) {
+        for (const p of rest) {
+          path.push(p);
+          onPath.add(key(p.x, p.y));
+        }
+        x = gx;
+        y = gy;
+        break;
+      }
+      path.pop();
+      onPath.clear();
+      for (const p of path) onPath.add(key(p.x, p.y));
+      const last = path[path.length - 1];
+      x = last.x;
+      y = last.y;
+    }
+    if (x !== gx || y !== gy) {
+      // 最終手段: スタートからゴールへの単純路を本線にする
+      const direct = shortestOddPath(n, sx, sy, gx, gy, new Set([key(sx, sy)]));
+      return [{ x: sx, y: sy }, ...direct];
+    }
+  }
+
+  return path;
+}
+
+/** forbidden をなるべく避けて奇数セル最短路（必要なら後で再試行） */
+function shortestOddPath(n, sx, sy, gx, gy, forbidden) {
+  const trySearch = (avoidForbidden) => {
+    const q = [{ x: sx, y: sy }];
+    const prev = new Map([[key(sx, sy), null]]);
+    let head = 0;
+    while (head < q.length) {
+      const cur = q[head++];
+      if (cur.x === gx && cur.y === gy) {
+        const out = [];
+        let ck = key(gx, gy);
+        while (ck && ck !== key(sx, sy)) {
+          out.push(parseKey(ck));
+          ck = prev.get(ck);
+        }
+        out.reverse();
+        return out;
+      }
+      for (const nb of oddNeighbors(n, cur.x, cur.y)) {
+        const k = key(nb.x, nb.y);
+        if (prev.has(k)) continue;
+        if (
+          avoidForbidden &&
+          forbidden.has(k) &&
+          !(nb.x === gx && nb.y === gy) &&
+          !(nb.x === sx && nb.y === sy)
+        ) {
+          continue;
+        }
+        prev.set(k, key(cur.x, cur.y));
+        q.push({ x: nb.x, y: nb.y });
+      }
+    }
+    return null;
+  };
+
+  return trySearch(true) || trySearch(false) || [{ x: gx, y: gy }];
+}
+
+function carveSpine(grid, spine) {
+  for (let i = 0; i < spine.length; i++) {
+    const { x, y } = spine[i];
+    grid[y][x] = PATH;
+    if (i > 0) {
+      const p = spine[i - 1];
+      carveLink(grid, p.x, p.y, x, y);
+    }
+  }
+}
+
+/** リンクを掘っても通路が木のままか（ダメなら元に戻す用のスナップショット） */
+function tryCarveLink(grid, x1, y1, x2, y2) {
+  const mx = (x1 + x2) / 2;
+  const my = (y1 + y2) / 2;
+  const before = [
+    [x1, y1, grid[y1][x1]],
+    [x2, y2, grid[y2][x2]],
+    [mx, my, grid[my][mx]],
+  ];
+  carveLink(grid, x1, y1, x2, y2);
+  if (isPerfectMaze(grid)) return true;
+  for (const [x, y, v] of before) grid[y][x] = v;
+  return false;
 }
 
 /**
- * 角を迷路本体へ1本だけ接続する。
- * 2方向つなぐと 2×2 の小ループができるため、必ず片側のみ開く。
+ * 本線から行き止まり分岐を生やす。
+ * - nearMiss: ゴール近くまで伸びて止まる（惜しい）
+ * - longFar: 分岐から遠くへ伸びて行き止まり
  */
-function connectCorners(grid, n) {
-  grid[1][1] = PATH;
-  grid[0][0] = PATH;
-  grid[0][1] = PATH; // (0,0)-(0,1)-(1,1) のみ。 (1,0) は開けない
-  grid[n - 2][n - 2] = PATH;
-  grid[n - 1][n - 1] = PATH;
-  grid[n - 1][n - 2] = PATH; // (n-1,n-1)-(n-1,n-2)-(n-2,n-2) のみ
+function growSpurs(grid, n, spine, rand) {
+  const gx = n - 2;
+  const gy = n - 2;
+  const pathSet = new Set(spine.map((p) => key(p.x, p.y)));
+
+  const spineDir = new Map();
+  for (let i = 0; i < spine.length; i++) {
+    const k = key(spine[i].x, spine[i].y);
+    const dirs = [];
+    if (i > 0) {
+      dirs.push({
+        dx: spine[i].x - spine[i - 1].x,
+        dy: spine[i].y - spine[i - 1].y,
+      });
+    }
+    if (i < spine.length - 1) {
+      dirs.push({
+        dx: spine[i + 1].x - spine[i].x,
+        dy: spine[i + 1].y - spine[i].y,
+      });
+    }
+    spineDir.set(k, dirs);
+  }
+
+  const candidates = spine.slice(1, Math.max(2, spine.length - 1));
+  const order = shuffle(candidates, rand);
+  const targetBranches = Math.max(6, Math.floor(spine.length * 0.62));
+  let made = 0;
+
+  for (const origin of order) {
+    if (made >= targetBranches) break;
+    const ok = key(origin.x, origin.y);
+    const along = spineDir.get(ok) || [];
+
+    const exits = shuffle(oddNeighbors(n, origin.x, origin.y), rand).filter((nb) => {
+      if (pathSet.has(key(nb.x, nb.y))) return false;
+      if (nb.x === gx && nb.y === gy) return false;
+      for (const d of along) {
+        if (nb.dx === d.dx && nb.dy === d.dy) return false;
+      }
+      return true;
+    });
+    if (!exits.length) continue;
+
+    const nearMiss = rand() < 0.4;
+    let started = false;
+    let cx;
+    let cy;
+    let pdx;
+    let pdy;
+
+    for (const first of exits) {
+      if (tryCarveLink(grid, origin.x, origin.y, first.x, first.y)) {
+        pathSet.add(key(first.x, first.y));
+        cx = first.x;
+        cy = first.y;
+        pdx = first.dx;
+        pdy = first.dy;
+        started = true;
+        break;
+      }
+    }
+    if (!started) continue;
+
+    const maxLen = nearMiss
+      ? 4 + Math.floor(rand() * Math.max(4, Math.floor(n / 5)))
+      : 6 + Math.floor(rand() * Math.max(8, Math.floor(n / 3)));
+    const stopNear = 2 + Math.floor(rand() * 3);
+
+    for (let step = 1; step < maxLen; step++) {
+      if (nearMiss && manhattan(cx, cy, gx, gy) <= stopNear) break;
+
+      const opts = shuffle(
+        oddNeighbors(n, cx, cy).filter((nb) => {
+          if (pathSet.has(key(nb.x, nb.y))) return false;
+          if (nb.x === gx && nb.y === gy) return false;
+          return true;
+        }),
+        rand,
+      );
+      if (!opts.length) break;
+
+      // 重み付きで試し、木を壊す候補はスキップ
+      const ranked = opts
+        .map((nb) => {
+          const before = manhattan(cx, cy, gx, gy);
+          const after = manhattan(nb.x, nb.y, gx, gy);
+          let w = 1;
+          if (nearMiss) w = after < before ? 5 : after === before ? 1.2 : 0.25;
+          else w = after > before ? 3.2 : after === before ? 1.4 : 0.5;
+          if (nb.dx === pdx && nb.dy === pdy) w *= 1.5;
+          w *= 0.85 + rand() * 0.3;
+          return { nb, w };
+        })
+        .sort((a, b) => b.w - a.w);
+
+      let advanced = false;
+      for (const { nb } of ranked) {
+        if (tryCarveLink(grid, cx, cy, nb.x, nb.y)) {
+          pathSet.add(key(nb.x, nb.y));
+          pdx = nb.dx;
+          pdy = nb.dy;
+          cx = nb.x;
+          cy = nb.y;
+          advanced = true;
+          break;
+        }
+      }
+      if (!advanced) break;
+    }
+
+    made += 1;
+  }
+
+  return made;
 }
 
-/** BFS で最短路長（見つからなければ -1） */
-export function shortestPathLength(grid, start, goal) {
-  const n = grid.length;
-  const key = (x, y) => y * n + x;
-  if (grid[start.y]?.[start.x] !== PATH || grid[goal.y]?.[goal.x] !== PATH) return -1;
-  const seen = new Uint8Array(n * n);
-  const qx = [start.x];
-  const qy = [start.y];
-  const qd = [0];
-  seen[key(start.x, start.y)] = 1;
-  const ortho = [
-    [0, 1],
-    [0, -1],
-    [1, 0],
-    [-1, 0],
-  ];
-  let head = 0;
-  while (head < qx.length) {
-    const x = qx[head];
-    const y = qy[head];
-    const d = qd[head];
-    head += 1;
-    if (x === goal.x && y === goal.y) return d;
-    for (const [dx, dy] of ortho) {
-      const nx = x + dx;
-      const ny = y + dy;
-      if (nx < 0 || ny < 0 || nx >= n || ny >= n) continue;
-      if (grid[ny][nx] !== PATH) continue;
-      const k = key(nx, ny);
-      if (seen[k]) continue;
-      seen[k] = 1;
-      qx.push(nx);
-      qy.push(ny);
-      qd.push(d + 1);
-    }
-  }
-  return -1;
+function connectStartGoalCorners(grid, n) {
+  // 本線端 (1,1) / (n-2,n-2) へ片側だけ接続（ループ防止）
+  grid[1][1] = PATH;
+  grid[0][0] = PATH;
+  grid[0][1] = PATH;
+  grid[n - 2][n - 2] = PATH;
+  grid[n - 1][n - 1] = PATH;
+  grid[n - 1][n - 2] = PATH;
 }
 
 function degreeAt(grid, n, x, y) {
   let d = 0;
-  if (x > 0 && grid[y][x - 1] === PATH) d += 1;
-  if (x < n - 1 && grid[y][x + 1] === PATH) d += 1;
-  if (y > 0 && grid[y - 1][x] === PATH) d += 1;
-  if (y < n - 1 && grid[y + 1][x] === PATH) d += 1;
+  for (const [dx, dy] of ORTHO) {
+    const nx = x + dx;
+    const ny = y + dy;
+    if (nx < 0 || ny < 0 || nx >= n || ny >= n) continue;
+    if (grid[ny][nx] === PATH) d += 1;
+  }
   return d;
 }
 
-/** 分岐点（次数≥3）の数 */
 export function countJunctions(grid) {
   const n = grid.length;
   let c = 0;
@@ -174,10 +408,7 @@ export function countJunctions(grid) {
   return c;
 }
 
-/**
- * 通路グラフが連結な木（完璧迷路＝ループなし）かどうか。
- * 連結かつ edges === vertices - 1 なら閉路なし。
- */
+/** 通路が連結な木か（ループなし） */
 export function isPerfectMaze(grid) {
   const n = grid.length;
   let cells = 0;
@@ -188,7 +419,6 @@ export function isPerfectMaze(grid) {
       if (grid[y][x] !== PATH) continue;
       cells += 1;
       if (!start) start = { x, y };
-      // 二重計上を避けるため右・下のみ
       if (x + 1 < n && grid[y][x + 1] === PATH) edges += 1;
       if (y + 1 < n && grid[y + 1][x] === PATH) edges += 1;
     }
@@ -196,22 +426,15 @@ export function isPerfectMaze(grid) {
   if (cells < 2 || !start) return false;
   if (edges !== cells - 1) return false;
 
-  // 連結確認
   const seen = new Uint8Array(n * n);
   const stack = [start.x, start.y];
   seen[start.y * n + start.x] = 1;
   let visited = 0;
-  const ortho = [
-    [0, 1],
-    [0, -1],
-    [1, 0],
-    [-1, 0],
-  ];
   while (stack.length) {
     const y = stack.pop();
     const x = stack.pop();
     visited += 1;
-    for (const [dx, dy] of ortho) {
+    for (const [dx, dy] of ORTHO) {
       const nx = x + dx;
       const ny = y + dy;
       if (nx < 0 || ny < 0 || nx >= n || ny >= n) continue;
@@ -225,78 +448,277 @@ export function isPerfectMaze(grid) {
   return visited === cells;
 }
 
-/**
- * 奇数サイズの迷路を生成。
- * スタートは左上 (0,0)、ゴールは右下 (size-1, size-1)。
- * 分岐は多いがループ（閉路）は作らない完璧迷路。
- */
-export function generateMaze(size, seed = (Date.now() >>> 0)) {
-  let n = Math.max(5, size | 0);
-  if (n % 2 === 0) n += 1;
-  const goal = { x: n - 2, y: n - 2 };
-  const grid = Array.from({ length: n }, () => Array(n).fill(WALL));
+/** すべての壁が外周の壁まで連結しているか */
+export function wallsConnectedToBorder(grid) {
+  const n = grid.length;
+  const seen = new Uint8Array(n * n);
+  const q = [];
+  const push = (x, y) => {
+    if (x < 0 || y < 0 || x >= n || y >= n) return;
+    if (grid[y][x] !== WALL) return;
+    const k = y * n + x;
+    if (seen[k]) return;
+    seen[k] = 1;
+    q.push(x, y);
+  };
 
-  let best = null;
-  let bestScore = -Infinity;
-  const start = { x: 0, y: 0 };
-  const end = { x: n - 1, y: n - 1 };
-  const manhattanGoal = (n - 1) * 2;
-
-  for (let attempt = 0; attempt < MAX_REGEN; attempt++) {
-    const rand = mulberry32((seed + attempt * 9973) >>> 0);
-    // 開始位置を散らして「スタートからゴールへ一直線」な骨格を避ける
-    const oddCells = Math.floor((n - 1) / 2);
-    const cx = 1 + 2 * Math.floor(rand() * oddCells);
-    const cy = 1 + 2 * Math.floor(rand() * oddCells);
-
-    carveGrowingTree(grid, n, rand, cx, cy, goal);
-    connectCorners(grid, n);
-    // braid はしない（ループ禁止）
-
-    if (!isPerfectMaze(grid)) continue;
-
-    const dist = shortestPathLength(grid, start, end);
-    if (dist < 0) continue;
-
-    const junctions = countJunctions(grid);
-    const minDist = Math.max(Math.floor(n * 2.1), Math.floor(manhattanGoal * 1.25));
-    const directness = manhattanGoal / Math.max(dist, 1);
-    // 分岐多め・遠回りを強く評価。直進に近い最短路は大きく減点
-    const score =
-      junctions * 2.5 +
-      dist * 1.2 -
-      directness * 120 -
-      (dist < minDist ? (minDist - dist) * 10 : 0);
-
-    if (score > bestScore) {
-      bestScore = score;
-      best = {
-        grid: grid.map((row) => row.slice()),
-        dist,
-        junctions,
-      };
-    }
-    // 分岐が多く、最短路がマンハッタンより十分長い
-    if (junctions >= Math.floor(n * 1.2) && dist >= minDist && directness <= 0.78) break;
+  for (let i = 0; i < n; i++) {
+    push(i, 0);
+    push(i, n - 1);
+    push(0, i);
+    push(n - 1, i);
   }
 
-  if (best) {
-    for (let y = 0; y < n; y++) {
-      for (let x = 0; x < n; x++) grid[y][x] = best.grid[y][x];
+  let head = 0;
+  while (head < q.length) {
+    const x = q[head++];
+    const y = q[head++];
+    for (const [dx, dy] of ORTHO) push(x + dx, y + dy);
+  }
+
+  for (let y = 0; y < n; y++) {
+    for (let x = 0; x < n; x++) {
+      if (grid[y][x] === WALL && !seen[y * n + x]) return false;
     }
-  } else {
-    // フォールバック（通常到達しない）
-    const rand = mulberry32(seed);
-    carveGrowingTree(grid, n, rand, 1, 1, goal);
-    connectCorners(grid, n);
+  }
+  return true;
+}
+
+/**
+ * 孤立壁を解消する。通路の木構造を壊す変更は採用しない。
+ */
+function fixWallIslands(grid) {
+  const n = grid.length;
+  for (let iter = 0; iter < n * 4; iter++) {
+    if (wallsConnectedToBorder(grid)) return true;
+
+    const seen = new Uint8Array(n * n);
+    const q = [];
+    const push = (x, y) => {
+      if (x < 0 || y < 0 || x >= n || y >= n) return;
+      if (grid[y][x] !== WALL) return;
+      const k = y * n + x;
+      if (seen[k]) return;
+      seen[k] = 1;
+      q.push(x, y);
+    };
+    for (let i = 0; i < n; i++) {
+      push(i, 0);
+      push(i, n - 1);
+      push(0, i);
+      push(n - 1, i);
+    }
+    let head = 0;
+    while (head < q.length) {
+      const x = q[head++];
+      const y = q[head++];
+      for (const [dx, dy] of ORTHO) push(x + dx, y + dy);
+    }
+
+    let fixed = false;
+    for (let y = 1; y < n - 1 && !fixed; y++) {
+      for (let x = 1; x < n - 1 && !fixed; x++) {
+        if (grid[y][x] !== WALL || seen[y * n + x]) continue;
+
+        // 1) 孤立壁→通路（木が保てるときだけ）
+        grid[y][x] = PATH;
+        if (isPerfectMaze(grid) && wallsConnectedToBorder(grid)) {
+          fixed = true;
+          break;
+        }
+        grid[y][x] = WALL;
+
+        // 2) 隣接する行き止まり側の通路を壁にして島を外周へ繋ぐ
+        for (const [dx, dy] of ORTHO) {
+          const nx = x + dx;
+          const ny = y + dy;
+          if (nx <= 0 || ny <= 0 || nx >= n - 1 || ny >= n - 1) continue;
+          if (grid[ny][nx] !== PATH) continue;
+          if (degreeAt(grid, n, nx, ny) !== 1) continue; // 行き止まりセルのみ
+          grid[ny][nx] = WALL;
+          if (isPerfectMaze(grid) && wallsConnectedToBorder(grid)) {
+            fixed = true;
+            break;
+          }
+          grid[ny][nx] = PATH;
+        }
+      }
+    }
+    if (!fixed) return false;
+  }
+  return wallsConnectedToBorder(grid);
+}
+
+/** 行き止まりが本線以外に存在するか／正解路が一意か */
+export function hasUniqueSolution(grid, start, goal) {
+  // 木なら start-goal は一意。連結木であることを見る
+  return isPerfectMaze(grid) && shortestPathLength(grid, start, goal) >= 0;
+}
+
+export function shortestPathLength(grid, start, goal) {
+  const n = grid.length;
+  const id = (x, y) => y * n + x;
+  if (grid[start.y]?.[start.x] !== PATH || grid[goal.y]?.[goal.x] !== PATH) return -1;
+  const seen = new Uint8Array(n * n);
+  const qx = [start.x];
+  const qy = [start.y];
+  const qd = [0];
+  seen[id(start.x, start.y)] = 1;
+  let head = 0;
+  while (head < qx.length) {
+    const x = qx[head];
+    const y = qy[head];
+    const d = qd[head];
+    head += 1;
+    if (x === goal.x && y === goal.y) return d;
+    for (const [dx, dy] of ORTHO) {
+      const nx = x + dx;
+      const ny = y + dy;
+      if (nx < 0 || ny < 0 || nx >= n || ny >= n) continue;
+      if (grid[ny][nx] !== PATH) continue;
+      const k = id(nx, ny);
+      if (seen[k]) continue;
+      seen[k] = 1;
+      qx.push(nx);
+      qy.push(ny);
+      qd.push(d + 1);
+    }
+  }
+  return -1;
+}
+
+/** 本線上の分岐点（正解路のセルで次数≥3） */
+export function countSpineBranches(grid, start, goal) {
+  const n = grid.length;
+  const spine = solutionPathCells(grid, start, goal);
+  if (!spine) return 0;
+  let c = 0;
+  for (const { x, y } of spine) {
+    if (degreeAt(grid, n, x, y) >= 3) c += 1;
+  }
+  return c;
+}
+
+function solutionPathCells(grid, start, goal) {
+  const n = grid.length;
+  const id = (x, y) => y * n + x;
+  const prev = new Int32Array(n * n).fill(-1);
+  const qx = [start.x];
+  const qy = [start.y];
+  prev[id(start.x, start.y)] = -2;
+  let head = 0;
+  let found = false;
+  while (head < qx.length) {
+    const x = qx[head];
+    const y = qy[head];
+    head += 1;
+    if (x === goal.x && y === goal.y) {
+      found = true;
+      break;
+    }
+    for (const [dx, dy] of ORTHO) {
+      const nx = x + dx;
+      const ny = y + dy;
+      if (nx < 0 || ny < 0 || nx >= n || ny >= n) continue;
+      if (grid[ny][nx] !== PATH) continue;
+      const k = id(nx, ny);
+      if (prev[k] !== -1) continue;
+      prev[k] = id(x, y);
+      qx.push(nx);
+      qy.push(ny);
+    }
+  }
+  if (!found) return null;
+  const cells = [];
+  let cur = id(goal.x, goal.y);
+  while (cur >= 0) {
+    cells.push({ x: cur % n, y: (cur / n) | 0 });
+    cur = prev[cur];
+    if (cur === -2) break;
+  }
+  return cells;
+}
+
+/**
+ * 奇数サイズの迷路を生成。
+ * スタート左上・ゴール右下。本線＋行き止まり分岐。ループなし。
+ */
+export function generateMaze(size, seed = (Date.now() >>> 0)) {
+  let n = Math.max(7, size | 0);
+  if (n % 2 === 0) n += 1;
+
+  const start = { x: 0, y: 0 };
+  const goal = { x: n - 1, y: n - 1 };
+  let best = null;
+  let bestScore = -Infinity;
+
+  for (let attempt = 0; attempt < 24; attempt++) {
+    const rand = mulberry32((seed + attempt * 7919) >>> 0);
+    const grid = Array.from({ length: n }, () => Array(n).fill(WALL));
+
+    const spine = buildSpine(n, rand);
+    if (spine.length < 4) continue;
+    if (spine[spine.length - 1].x !== n - 2 || spine[spine.length - 1].y !== n - 2) {
+      // ゴール奇数セルへ強制接続
+      const last = spine[spine.length - 1];
+      const tail = shortestOddPath(n, last.x, last.y, n - 2, n - 2, new Set(spine.map((p) => key(p.x, p.y))));
+      for (const p of tail) spine.push(p);
+    }
+
+    carveSpine(grid, spine);
+    connectStartGoalCorners(grid, n);
+    if (!isPerfectMaze(grid)) continue;
+    const branches = growSpurs(grid, n, spine, rand);
+    if (!isPerfectMaze(grid)) continue;
+    if (!fixWallIslands(grid)) continue;
+    if (!isPerfectMaze(grid)) continue;
+    if (!wallsConnectedToBorder(grid)) continue;
+
+    const dist = shortestPathLength(grid, start, goal);
+    if (dist < 0) continue;
+    const spineBranches = countSpineBranches(grid, start, goal);
+    const junctions = countJunctions(grid);
+
+    const score = spineBranches * 8 + branches * 3 + junctions + dist * 0.15;
+    if (score > bestScore) {
+      bestScore = score;
+      best = grid.map((row) => row.slice());
+    }
+    if (spineBranches >= Math.max(5, Math.floor(n / 4))) break;
+  }
+
+  let grid = best;
+  if (!grid) {
+    for (let attempt = 0; attempt < 40; attempt++) {
+      const rand = mulberry32((seed + 10007 + attempt * 6163) >>> 0);
+      const g = Array.from({ length: n }, () => Array(n).fill(WALL));
+      const spine = buildSpine(n, rand);
+      carveSpine(g, spine);
+      connectStartGoalCorners(g, n);
+      if (!isPerfectMaze(g)) continue;
+      growSpurs(g, n, spine, rand);
+      if (!isPerfectMaze(g)) continue;
+      if (!fixWallIslands(g)) continue;
+      if (!isPerfectMaze(g) || !wallsConnectedToBorder(g)) continue;
+      grid = g;
+      break;
+    }
+  }
+  if (!grid) {
+    // 最後の手段: 本線のみ
+    const rand = mulberry32(seed ^ 0xabcde);
+    grid = Array.from({ length: n }, () => Array(n).fill(WALL));
+    const spine = buildSpine(n, rand);
+    carveSpine(grid, spine);
+    connectStartGoalCorners(grid, n);
   }
 
   return {
     size: n,
     seed,
     grid,
-    start: { x: 0, y: 0 },
-    goal: { x: n - 1, y: n - 1 },
+    start,
+    goal,
   };
 }
 
@@ -304,7 +726,6 @@ export function createMask(size) {
   return Array.from({ length: size }, () => Array(size).fill(false));
 }
 
-/** 中心セル周囲 radius（デフォルト1 → 3×3）のマスクを開く。新規座標の flat リストを返す */
 export function revealAround(mask, cx, cy, radius = 1) {
   const n = mask.length;
   const opened = [];
@@ -336,7 +757,6 @@ export function cloneMask(mask) {
   return mask.map((row) => row.slice());
 }
 
-/** mask を疎なリストへ（転送用） */
 export function maskToList(mask) {
   const list = [];
   for (let y = 0; y < mask.length; y++) {
