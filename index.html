@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>MkMk Re Maze — 迷路対戦</title>
+  <meta name="description" content="GitHub Pagesで遊べるP2P迷路タイムアタック／オンライン対戦" />
+  <link rel="stylesheet" href="./css/styles.css" />
+</head>
+<body>
+  <!-- TITLE -->
+  <section id="screen-title" class="screen active">
+    <div class="title-atmosphere" aria-hidden="true">
+      <canvas id="title-maze" width="640" height="640"></canvas>
+    </div>
+    <div class="title-brand">
+      <p class="brand-eyebrow">FOG RACE · P2P</p>
+      <h1 class="brand-mark">MkMk Re Maze</h1>
+      <p class="brand-sub">霧の迷路を切り開き、ゴールを奪い合う。</p>
+    </div>
+    <div class="title-actions">
+      <button class="btn primary large" id="btn-single">シングル（タイムアタック）</button>
+      <button class="btn large" id="btn-host">部屋を作る</button>
+      <button class="btn large" id="btn-join">部屋に入る</button>
+      <button class="btn ghost" id="btn-howto">遊び方</button>
+    </div>
+  </section>
+
+  <!-- HOWTO -->
+  <section id="screen-howto" class="screen">
+    <div class="panel howto">
+      <h2>遊び方</h2>
+      <ol>
+        <li><strong>シングル</strong>は 45×45 のランダム迷路を最速クリアするタイムアタックです。</li>
+        <li><strong>オンライン</strong>は部屋コードを共有し、最大8人で同時攻略。最初にゴールした人が勝利します。</li>
+        <li>画面左が<strong>全体マップ</strong>（通った周囲 3×3 だけ霧が晴れる）。右が<strong>自機周辺 5×5</strong>の拡大表示です。</li>
+        <li>通路は白、壁は黒。スタートは常に左上、ゴールは右下。</li>
+        <li>オンラインでは霧の開放状況が全員で共有されます。他プレイヤーは両マップに表示されます。</li>
+        <li>操作は ←↑↓→ または WASD。モバイルは画面下の十字キー。</li>
+        <li>部屋主は迷路サイズを変更できます（基準 55×55、奇数推奨）。</li>
+      </ol>
+      <div class="row-actions">
+        <button class="btn primary" id="btn-howto-back">戻る</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- LOBBY -->
+  <section id="screen-lobby" class="screen">
+    <div class="panel">
+      <h2>オンラインロビー</h2>
+      <p id="lobby-role" class="hint"></p>
+      <label class="field">ニックネーム
+        <input id="lobby-name" maxlength="12" value="プレイヤー" />
+      </label>
+      <div id="lobby-room-wrap">
+        <label class="field">部屋コード
+          <input id="lobby-room" maxlength="8" placeholder="例: AB12CD" style="text-transform:uppercase" />
+        </label>
+      </div>
+      <div id="lobby-host-tools">
+        <div class="code-big" id="lobby-code-display">------</div>
+        <div class="row-actions">
+          <button class="btn tiny" id="btn-copy-code">コードをコピー</button>
+        </div>
+        <label class="field">迷路サイズ（奇数）
+          <input type="number" id="lobby-size" value="55" min="15" max="99" step="2" />
+        </label>
+      </div>
+      <div id="net-status">未接続</div>
+      <div id="lobby-players"></div>
+      <div class="row-actions">
+        <button class="btn" id="btn-lobby-back">戻る</button>
+        <button class="btn primary" id="btn-lobby-connect">接続</button>
+        <button class="btn primary" id="btn-lobby-start">ゲーム開始</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- GAME -->
+  <section id="screen-game" class="screen">
+    <header class="topbar">
+      <span class="brand-mini">MkMk Re Maze</span>
+      <div class="topbar-meta">
+        <span id="hud-mode">SINGLE</span>
+        <span id="hud-timer">00:00.00</span>
+        <span id="hud-size">45×45</span>
+      </div>
+      <button class="btn tiny ghost" id="btn-quit">やめる</button>
+    </header>
+
+    <div class="game-layout">
+      <div class="map-panel overview-panel">
+        <div class="map-label">全体マップ · 霧共有</div>
+        <div class="canvas-wrap" id="overview-wrap">
+          <canvas id="canvas-overview"></canvas>
+        </div>
+      </div>
+      <aside class="side-panel">
+        <div class="map-panel local-panel">
+          <div class="map-label">周辺 5×5</div>
+          <div class="canvas-wrap" id="local-wrap">
+            <canvas id="canvas-local"></canvas>
+          </div>
+        </div>
+        <div class="roster" id="roster"></div>
+        <div class="legend">
+          <span><i class="sw path"></i>通路</span>
+          <span><i class="sw wall"></i>壁</span>
+          <span><i class="sw fog"></i>未踏</span>
+        </div>
+      </aside>
+    </div>
+
+    <div class="dpad" id="dpad" aria-label="移動">
+      <button class="dpad-btn" data-dir="up">▲</button>
+      <div class="dpad-mid">
+        <button class="dpad-btn" data-dir="left">◀</button>
+        <button class="dpad-btn" data-dir="down">▼</button>
+        <button class="dpad-btn" data-dir="right">▶</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- RESULT -->
+  <section id="screen-result" class="screen">
+    <div class="panel result">
+      <h2 id="result-title">クリア！</h2>
+      <p id="result-time" class="result-time">00:00.00</p>
+      <div id="result-rankings"></div>
+      <p id="result-best" class="hint"></p>
+      <div class="row-actions">
+        <button class="btn primary" id="btn-result-again">もう一度</button>
+        <button class="btn" id="btn-result-title">タイトルへ</button>
+      </div>
+    </div>
+  </section>
+
+  <div id="toast"></div>
+
+  <script type="module" src="./js/main.js"></script>
+</body>
+</html>
