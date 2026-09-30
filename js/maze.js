@@ -10,12 +10,10 @@ const STEP_DIRS = [
   [2, 0],
 ];
 
-/** Growing Tree: ランダム選択比率（高いほど分岐・薮が多くゴールが分かりにくい） */
-const RANDOM_ACTIVE = 0.82;
+/** Growing Tree: ランダム選択比率（高いほど分岐が多くなる。ループは作らない） */
+const RANDOM_ACTIVE = 0.88;
 /** ゴールに近づく掘削を抑える重み */
 const AWAY_FROM_GOAL_WEIGHT = 3.6;
-/** 完璧迷路のあと、壁を少し外してループを作る比率（迷いやすさ） */
-const BRAID_RATE = 0.045;
 /** 最短路が短すぎるときの再生成上限 */
 const MAX_REGEN = 14;
 
@@ -103,33 +101,17 @@ function carveGrowingTree(grid, n, rand, startX, startY, goal) {
   }
 }
 
+/**
+ * 角を迷路本体へ1本だけ接続する。
+ * 2方向つなぐと 2×2 の小ループができるため、必ず片側のみ開く。
+ */
 function connectCorners(grid, n) {
-  grid[0][0] = PATH;
-  grid[0][1] = PATH;
-  grid[1][0] = PATH;
   grid[1][1] = PATH;
-  grid[n - 1][n - 1] = PATH;
-  grid[n - 1][n - 2] = PATH;
-  grid[n - 2][n - 1] = PATH;
+  grid[0][0] = PATH;
+  grid[0][1] = PATH; // (0,0)-(0,1)-(1,1) のみ。 (1,0) は開けない
   grid[n - 2][n - 2] = PATH;
-}
-
-/** 隣接する通路同士の壁を少し外し、偽の合流・ループを増やす */
-function braidMaze(grid, n, rand, rate) {
-  for (let y = 1; y < n - 1; y++) {
-    for (let x = 1; x < n - 1; x++) {
-      if (grid[y][x] !== WALL) continue;
-      // 壁セルが左右または上下の通路を隔てているときだけ候補
-      const left = grid[y][x - 1] === PATH;
-      const right = grid[y][x + 1] === PATH;
-      const up = grid[y - 1][x] === PATH;
-      const down = grid[y + 1][x] === PATH;
-      const horizontalBridge = left && right && !up && !down;
-      const verticalBridge = up && down && !left && !right;
-      if (!(horizontalBridge || verticalBridge)) continue;
-      if (rand() < rate) grid[y][x] = PATH;
-    }
-  }
+  grid[n - 1][n - 1] = PATH;
+  grid[n - 1][n - 2] = PATH; // (n-1,n-1)-(n-1,n-2)-(n-2,n-2) のみ
 }
 
 /** BFS で最短路長（見つからなければ -1） */
@@ -193,9 +175,60 @@ export function countJunctions(grid) {
 }
 
 /**
+ * 通路グラフが連結な木（完璧迷路＝ループなし）かどうか。
+ * 連結かつ edges === vertices - 1 なら閉路なし。
+ */
+export function isPerfectMaze(grid) {
+  const n = grid.length;
+  let cells = 0;
+  let edges = 0;
+  let start = null;
+  for (let y = 0; y < n; y++) {
+    for (let x = 0; x < n; x++) {
+      if (grid[y][x] !== PATH) continue;
+      cells += 1;
+      if (!start) start = { x, y };
+      // 二重計上を避けるため右・下のみ
+      if (x + 1 < n && grid[y][x + 1] === PATH) edges += 1;
+      if (y + 1 < n && grid[y + 1][x] === PATH) edges += 1;
+    }
+  }
+  if (cells < 2 || !start) return false;
+  if (edges !== cells - 1) return false;
+
+  // 連結確認
+  const seen = new Uint8Array(n * n);
+  const stack = [start.x, start.y];
+  seen[start.y * n + start.x] = 1;
+  let visited = 0;
+  const ortho = [
+    [0, 1],
+    [0, -1],
+    [1, 0],
+    [-1, 0],
+  ];
+  while (stack.length) {
+    const y = stack.pop();
+    const x = stack.pop();
+    visited += 1;
+    for (const [dx, dy] of ortho) {
+      const nx = x + dx;
+      const ny = y + dy;
+      if (nx < 0 || ny < 0 || nx >= n || ny >= n) continue;
+      if (grid[ny][nx] !== PATH) continue;
+      const k = ny * n + nx;
+      if (seen[k]) continue;
+      seen[k] = 1;
+      stack.push(nx, ny);
+    }
+  }
+  return visited === cells;
+}
+
+/**
  * 奇数サイズの迷路を生成。
  * スタートは左上 (0,0)、ゴールは右下 (size-1, size-1)。
- * 分岐が多く、ゴール方向が直感で分かりにくい構造にする。
+ * 分岐は多いがループ（閉路）は作らない完璧迷路。
  */
 export function generateMaze(size, seed = (Date.now() >>> 0)) {
   let n = Math.max(5, size | 0);
@@ -218,7 +251,9 @@ export function generateMaze(size, seed = (Date.now() >>> 0)) {
 
     carveGrowingTree(grid, n, rand, cx, cy, goal);
     connectCorners(grid, n);
-    braidMaze(grid, n, rand, BRAID_RATE);
+    // braid はしない（ループ禁止）
+
+    if (!isPerfectMaze(grid)) continue;
 
     const dist = shortestPathLength(grid, start, end);
     if (dist < 0) continue;
