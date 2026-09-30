@@ -67,9 +67,11 @@ describe('maze generation', () => {
       assert.equal(hasUniqueSolution(m.grid, m.start, m.goal), true, `unique seed=${seed}`);
       assert.equal(wallsConnectedToBorder(m.grid), true, `wall island seed=${seed}`);
       const spineBranches = countSpineBranches(m.grid, m.start, m.goal);
-      assert.ok(spineBranches >= 8, `spineBranches ${spineBranches} seed=${seed}`);
+      assert.ok(spineBranches >= 14, `spineBranches ${spineBranches} seed=${seed}`);
       const junctions = countJunctions(m.grid);
-      assert.ok(junctions >= 8, `junctions ${junctions} seed=${seed}`);
+      // 枝の再分岐も含め、本線分岐より全体ジャンクションが多い
+      assert.ok(junctions >= 20, `junctions ${junctions} seed=${seed}`);
+      assert.ok(junctions >= spineBranches, `junctions ${junctions} < spine ${spineBranches}`);
     }
   });
 
