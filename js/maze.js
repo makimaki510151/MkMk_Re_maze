@@ -3,6 +3,22 @@
 export const PATH = 0;
 export const WALL = 1;
 
+const STEP_DIRS = [
+  [0, -2],
+  [0, 2],
+  [-2, 0],
+  [2, 0],
+];
+
+/** Growing Tree: ランダム選択比率（高いほど分岐・薮が多くゴールが分かりにくい） */
+const RANDOM_ACTIVE = 0.82;
+/** ゴールに近づく掘削を抑える重み */
+const AWAY_FROM_GOAL_WEIGHT = 3.6;
+/** 完璧迷路のあと、壁を少し外してループを作る比率（迷いやすさ） */
+const BRAID_RATE = 0.045;
+/** 最短路が短すぎるときの再生成上限 */
+const MAX_REGEN = 14;
+
 /** 決定的 RNG（Mulberry32） */
 export function mulberry32(seed) {
   let a = seed >>> 0;
@@ -15,60 +31,230 @@ export function mulberry32(seed) {
   };
 }
 
-function shuffle(arr, rand) {
-  const a = [...arr];
-  for (let i = a.length - 1; i > 0; i--) {
-    const j = Math.floor(rand() * (i + 1));
-    [a[i], a[j]] = [a[j], a[i]];
+function inCarveBounds(n, x, y) {
+  return x > 0 && y > 0 && x < n - 1 && y < n - 1;
+}
+
+function unvisitedNeighbors(grid, n, x, y) {
+  const out = [];
+  for (const [dx, dy] of STEP_DIRS) {
+    const nx = x + dx;
+    const ny = y + dy;
+    if (inCarveBounds(n, nx, ny) && grid[ny][nx] === WALL) {
+      out.push({ dx, dy, nx, ny });
+    }
   }
-  return a;
+  return out;
+}
+
+function manhattan(x, y, gx, gy) {
+  return Math.abs(gx - x) + Math.abs(gy - y);
+}
+
+/**
+ * 分岐先を選ぶ。ゴールへ直進しにくい方向を優先しつつ乱択。
+ */
+function pickConfusingNeighbor(neighbors, x, y, goal, rand) {
+  if (neighbors.length === 1) return neighbors[0];
+
+  let total = 0;
+  const weights = neighbors.map((d) => {
+    const before = manhattan(x, y, goal.x, goal.y);
+    const after = manhattan(d.nx, d.ny, goal.x, goal.y);
+    // ゴールから遠ざかる／横に逸れるほど重い
+    let w = 1;
+    if (after > before) w = AWAY_FROM_GOAL_WEIGHT;
+    else if (after === before) w = AWAY_FROM_GOAL_WEIGHT * 0.75;
+    else w = 1;
+    // わずかにノイズ
+    w *= 0.85 + rand() * 0.3;
+    total += w;
+    return w;
+  });
+
+  let r = rand() * total;
+  for (let i = 0; i < neighbors.length; i++) {
+    r -= weights[i];
+    if (r <= 0) return neighbors[i];
+  }
+  return neighbors[neighbors.length - 1];
+}
+
+function carveGrowingTree(grid, n, rand, startX, startY, goal) {
+  for (let y = 0; y < n; y++) grid[y].fill(WALL);
+  grid[startY][startX] = PATH;
+  const active = [{ x: startX, y: startY }];
+
+  while (active.length) {
+    const idx =
+      rand() < RANDOM_ACTIVE
+        ? Math.floor(rand() * active.length)
+        : active.length - 1;
+    const { x, y } = active[idx];
+    const neighbors = unvisitedNeighbors(grid, n, x, y);
+    if (!neighbors.length) {
+      active.splice(idx, 1);
+      continue;
+    }
+    const chosen = pickConfusingNeighbor(neighbors, x, y, goal, rand);
+    grid[y + chosen.dy / 2][x + chosen.dx / 2] = PATH;
+    grid[chosen.ny][chosen.nx] = PATH;
+    active.push({ x: chosen.nx, y: chosen.ny });
+  }
+}
+
+function connectCorners(grid, n) {
+  grid[0][0] = PATH;
+  grid[0][1] = PATH;
+  grid[1][0] = PATH;
+  grid[1][1] = PATH;
+  grid[n - 1][n - 1] = PATH;
+  grid[n - 1][n - 2] = PATH;
+  grid[n - 2][n - 1] = PATH;
+  grid[n - 2][n - 2] = PATH;
+}
+
+/** 隣接する通路同士の壁を少し外し、偽の合流・ループを増やす */
+function braidMaze(grid, n, rand, rate) {
+  for (let y = 1; y < n - 1; y++) {
+    for (let x = 1; x < n - 1; x++) {
+      if (grid[y][x] !== WALL) continue;
+      // 壁セルが左右または上下の通路を隔てているときだけ候補
+      const left = grid[y][x - 1] === PATH;
+      const right = grid[y][x + 1] === PATH;
+      const up = grid[y - 1][x] === PATH;
+      const down = grid[y + 1][x] === PATH;
+      const horizontalBridge = left && right && !up && !down;
+      const verticalBridge = up && down && !left && !right;
+      if (!(horizontalBridge || verticalBridge)) continue;
+      if (rand() < rate) grid[y][x] = PATH;
+    }
+  }
+}
+
+/** BFS で最短路長（見つからなければ -1） */
+export function shortestPathLength(grid, start, goal) {
+  const n = grid.length;
+  const key = (x, y) => y * n + x;
+  if (grid[start.y]?.[start.x] !== PATH || grid[goal.y]?.[goal.x] !== PATH) return -1;
+  const seen = new Uint8Array(n * n);
+  const qx = [start.x];
+  const qy = [start.y];
+  const qd = [0];
+  seen[key(start.x, start.y)] = 1;
+  const ortho = [
+    [0, 1],
+    [0, -1],
+    [1, 0],
+    [-1, 0],
+  ];
+  let head = 0;
+  while (head < qx.length) {
+    const x = qx[head];
+    const y = qy[head];
+    const d = qd[head];
+    head += 1;
+    if (x === goal.x && y === goal.y) return d;
+    for (const [dx, dy] of ortho) {
+      const nx = x + dx;
+      const ny = y + dy;
+      if (nx < 0 || ny < 0 || nx >= n || ny >= n) continue;
+      if (grid[ny][nx] !== PATH) continue;
+      const k = key(nx, ny);
+      if (seen[k]) continue;
+      seen[k] = 1;
+      qx.push(nx);
+      qy.push(ny);
+      qd.push(d + 1);
+    }
+  }
+  return -1;
+}
+
+function degreeAt(grid, n, x, y) {
+  let d = 0;
+  if (x > 0 && grid[y][x - 1] === PATH) d += 1;
+  if (x < n - 1 && grid[y][x + 1] === PATH) d += 1;
+  if (y > 0 && grid[y - 1][x] === PATH) d += 1;
+  if (y < n - 1 && grid[y + 1][x] === PATH) d += 1;
+  return d;
+}
+
+/** 分岐点（次数≥3）の数 */
+export function countJunctions(grid) {
+  const n = grid.length;
+  let c = 0;
+  for (let y = 0; y < n; y++) {
+    for (let x = 0; x < n; x++) {
+      if (grid[y][x] === PATH && degreeAt(grid, n, x, y) >= 3) c += 1;
+    }
+  }
+  return c;
 }
 
 /**
  * 奇数サイズの迷路を生成。
  * スタートは左上 (0,0)、ゴールは右下 (size-1, size-1)。
- * 通路=0 / 壁=1。
+ * 分岐が多く、ゴール方向が直感で分かりにくい構造にする。
  */
 export function generateMaze(size, seed = (Date.now() >>> 0)) {
   let n = Math.max(5, size | 0);
   if (n % 2 === 0) n += 1;
-  const rand = mulberry32(seed);
+  const goal = { x: n - 2, y: n - 2 };
   const grid = Array.from({ length: n }, () => Array(n).fill(WALL));
 
-  // 奇数列・奇数行を通路候補として掘る（外周は壁のまま）
-  const carve = (x, y) => {
-    grid[y][x] = PATH;
-    const dirs = shuffle(
-      [
-        [0, -2],
-        [0, 2],
-        [-2, 0],
-        [2, 0],
-      ],
-      rand,
-    );
-    for (const [dx, dy] of dirs) {
-      const nx = x + dx;
-      const ny = y + dy;
-      if (nx > 0 && ny > 0 && nx < n - 1 && ny < n - 1 && grid[ny][nx] === WALL) {
-        grid[y + dy / 2][x + dx / 2] = PATH;
-        carve(nx, ny);
-      }
+  let best = null;
+  let bestScore = -Infinity;
+  const start = { x: 0, y: 0 };
+  const end = { x: n - 1, y: n - 1 };
+  const manhattanGoal = (n - 1) * 2;
+
+  for (let attempt = 0; attempt < MAX_REGEN; attempt++) {
+    const rand = mulberry32((seed + attempt * 9973) >>> 0);
+    // 開始位置を散らして「スタートからゴールへ一直線」な骨格を避ける
+    const oddCells = Math.floor((n - 1) / 2);
+    const cx = 1 + 2 * Math.floor(rand() * oddCells);
+    const cy = 1 + 2 * Math.floor(rand() * oddCells);
+
+    carveGrowingTree(grid, n, rand, cx, cy, goal);
+    connectCorners(grid, n);
+    braidMaze(grid, n, rand, BRAID_RATE);
+
+    const dist = shortestPathLength(grid, start, end);
+    if (dist < 0) continue;
+
+    const junctions = countJunctions(grid);
+    const minDist = Math.max(Math.floor(n * 2.1), Math.floor(manhattanGoal * 1.25));
+    const directness = manhattanGoal / Math.max(dist, 1);
+    // 分岐多め・遠回りを強く評価。直進に近い最短路は大きく減点
+    const score =
+      junctions * 2.5 +
+      dist * 1.2 -
+      directness * 120 -
+      (dist < minDist ? (minDist - dist) * 10 : 0);
+
+    if (score > bestScore) {
+      bestScore = score;
+      best = {
+        grid: grid.map((row) => row.slice()),
+        dist,
+        junctions,
+      };
     }
-  };
+    // 分岐が多く、最短路がマンハッタンより十分長い
+    if (junctions >= Math.floor(n * 1.2) && dist >= minDist && directness <= 0.78) break;
+  }
 
-  carve(1, 1);
-
-  // 左上・右下を必ず通路にし、内部迷路へ接続
-  grid[0][0] = PATH;
-  grid[0][1] = PATH;
-  grid[1][0] = PATH;
-  grid[n - 1][n - 1] = PATH;
-  grid[n - 1][n - 2] = PATH;
-  grid[n - 2][n - 1] = PATH;
-  // (1,1) と角を繋ぐ
-  grid[1][1] = PATH;
-  grid[n - 2][n - 2] = PATH;
+  if (best) {
+    for (let y = 0; y < n; y++) {
+      for (let x = 0; x < n; x++) grid[y][x] = best.grid[y][x];
+    }
+  } else {
+    // フォールバック（通常到達しない）
+    const rand = mulberry32(seed);
+    carveGrowingTree(grid, n, rand, 1, 1, goal);
+    connectCorners(grid, n);
+  }
 
   return {
     size: n,

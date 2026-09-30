@@ -11,7 +11,7 @@ function keyToDir(key) {
   return null;
 }
 
-function dirFromAxes(ax, ay, dead = 0.45) {
+function dirFromAxes(ax, ay, dead = 0.55) {
   const mag = Math.hypot(ax, ay);
   if (mag < dead) return null;
   return Math.abs(ax) > Math.abs(ay) ? (ax > 0 ? 'right' : 'left') : ay > 0 ? 'down' : 'up';
