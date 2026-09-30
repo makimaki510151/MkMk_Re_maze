@@ -8,17 +8,22 @@ export function createRenderer(overviewCanvas, localCanvas) {
   const lctx = localCanvas.getContext('2d');
 
   function resize() {
+    const dpr = Math.min(window.devicePixelRatio || 1, 2.5);
     const oParent = overviewCanvas.parentElement;
     const lParent = localCanvas.parentElement;
-    const od = Math.min(oParent?.clientWidth || 400, oParent?.clientHeight || 400, 520);
-    overviewCanvas.width = Math.floor(od * devicePixelRatio);
-    overviewCanvas.height = Math.floor(od * devicePixelRatio);
+
+    const oW = oParent?.clientWidth || 400;
+    const oH = oParent?.clientHeight || 400;
+    const od = Math.max(120, Math.floor(Math.min(oW, oH)));
+    overviewCanvas.width = Math.floor(od * dpr);
+    overviewCanvas.height = Math.floor(od * dpr);
     overviewCanvas.style.width = `${od}px`;
     overviewCanvas.style.height = `${od}px`;
 
-    const ld = Math.min(lParent?.clientWidth || 280, 360);
-    localCanvas.width = Math.floor(ld * devicePixelRatio);
-    localCanvas.height = Math.floor(ld * devicePixelRatio);
+    const lW = lParent?.clientWidth || 280;
+    const ld = Math.max(100, Math.floor(Math.min(lW, lParent?.clientHeight || lW, 360)));
+    localCanvas.width = Math.floor(ld * dpr);
+    localCanvas.height = Math.floor(ld * dpr);
     localCanvas.style.width = `${ld}px`;
     localCanvas.style.height = `${ld}px`;
   }
