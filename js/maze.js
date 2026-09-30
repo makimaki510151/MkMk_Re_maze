@@ -255,14 +255,100 @@ function tryCarveLink(grid, x1, y1, x2, y2) {
 }
 
 /**
- * 本線から行き止まり分岐を生やす。
- * - nearMiss: ゴール近くまで伸びて止まる（惜しい）
- * - longFar: 分岐から遠くへ伸びて行き止まり
+ * 1本の行き止まり枝を origin から生やす。成功したら先端セル列を返す。
  */
-function growSpurs(grid, n, spine, rand) {
+function growOneSpur(grid, n, pathSet, origin, rand, opts = {}) {
   const gx = n - 2;
   const gy = n - 2;
+  const { forbidDirs = [], nearMiss = false } = opts;
+
+  const exits = shuffle(oddNeighbors(n, origin.x, origin.y), rand).filter((nb) => {
+    if (pathSet.has(key(nb.x, nb.y))) return false;
+    if (nb.x === gx && nb.y === gy) return false;
+    for (const d of forbidDirs) {
+      if (nb.dx === d.dx && nb.dy === d.dy) return false;
+    }
+    return true;
+  });
+  if (!exits.length) return null;
+
+  let cx;
+  let cy;
+  let pdx;
+  let pdy;
+  let started = false;
+  for (const first of exits) {
+    if (tryCarveLink(grid, origin.x, origin.y, first.x, first.y)) {
+      pathSet.add(key(first.x, first.y));
+      cx = first.x;
+      cy = first.y;
+      pdx = first.dx;
+      pdy = first.dy;
+      started = true;
+      break;
+    }
+  }
+  if (!started) return null;
+
+  const chain = [{ x: cx, y: cy }];
+  const maxLen = nearMiss
+    ? 3 + Math.floor(rand() * Math.max(3, Math.floor(n / 6)))
+    : 3 + Math.floor(rand() * Math.max(6, Math.floor(n / 2.2)));
+  const stopNear = 2 + Math.floor(rand() * 3);
+
+  for (let step = 1; step < maxLen; step++) {
+    if (nearMiss && manhattan(cx, cy, gx, gy) <= stopNear) break;
+
+    const optsNb = oddNeighbors(n, cx, cy).filter((nb) => {
+      if (pathSet.has(key(nb.x, nb.y))) return false;
+      if (nb.x === gx && nb.y === gy) return false;
+      return true;
+    });
+    if (!optsNb.length) break;
+
+    const ranked = optsNb
+      .map((nb) => {
+        const before = manhattan(cx, cy, gx, gy);
+        const after = manhattan(nb.x, nb.y, gx, gy);
+        let w = 1;
+        if (nearMiss) w = after < before ? 5 : after === before ? 1.2 : 0.25;
+        else w = after > before ? 2.8 : after === before ? 1.5 : 0.7;
+        if (nb.dx === pdx && nb.dy === pdy) w *= 1.35;
+        // 途中でもさらに枝を残せるよう、たまには曲がる
+        if (rand() < 0.22) w *= nb.dx === pdx && nb.dy === pdy ? 0.55 : 1.8;
+        w *= 0.85 + rand() * 0.3;
+        return { nb, w };
+      })
+      .sort((a, b) => b.w - a.w);
+
+    let advanced = false;
+    for (const { nb } of ranked) {
+      if (tryCarveLink(grid, cx, cy, nb.x, nb.y)) {
+        pathSet.add(key(nb.x, nb.y));
+        pdx = nb.dx;
+        pdy = nb.dy;
+        cx = nb.x;
+        cy = nb.y;
+        chain.push({ x: cx, y: cy });
+        advanced = true;
+        break;
+      }
+    }
+    if (!advanced) break;
+  }
+
+  return chain;
+}
+
+/**
+ * 本線＋枝の途中から、行き止まり分岐を大量に生やす。
+ * - nearMiss: ゴール近くで止まる惜しい偽路
+ * - longFar: 遠くの行き止まり
+ * - 枝の途中からも再分岐（木のまま＝ループなし）
+ */
+function growSpurs(grid, n, spine, rand) {
   const pathSet = new Set(spine.map((p) => key(p.x, p.y)));
+  const spurCells = [];
 
   const spineDir = new Map();
   for (let i = 0; i < spine.length; i++) {
@@ -283,93 +369,63 @@ function growSpurs(grid, n, spine, rand) {
     spineDir.set(k, dirs);
   }
 
-  const candidates = spine.slice(1, Math.max(2, spine.length - 1));
-  const order = shuffle(candidates, rand);
-  const targetBranches = Math.max(6, Math.floor(spine.length * 0.62));
+  const oddCount = ((n - 1) / 2) ** 2;
+  // 本線セルほぼ全部＋再分岐で、空きを埋めるほど枝を生やす
+  const targetPrimary = Math.max(12, Math.floor(spine.length * 1.35));
+  const targetSecondary = Math.max(10, Math.floor(oddCount * 0.22));
   let made = 0;
 
-  for (const origin of order) {
-    if (made >= targetBranches) break;
-    const ok = key(origin.x, origin.y);
-    const along = spineDir.get(ok) || [];
+  // Pass 1: 本線の各点から、空いている横穴をできるだけ全部使う
+  const spineOrder = shuffle(spine.slice(1, Math.max(2, spine.length - 1)), rand);
+  for (const origin of spineOrder) {
+    if (made >= targetPrimary) break;
+    const along = spineDir.get(key(origin.x, origin.y)) || [];
+    // 同じ本線セルから最大2本まで
+    for (let k = 0; k < 2; k++) {
+      if (made >= targetPrimary) break;
+      const chain = growOneSpur(grid, n, pathSet, origin, rand, {
+        forbidDirs: along,
+        nearMiss: rand() < 0.35,
+      });
+      if (!chain) break;
+      for (const c of chain) spurCells.push(c);
+      made += 1;
+    }
+  }
 
-    const exits = shuffle(oddNeighbors(n, origin.x, origin.y), rand).filter((nb) => {
-      if (pathSet.has(key(nb.x, nb.y))) return false;
-      if (nb.x === gx && nb.y === gy) return false;
-      for (const d of along) {
-        if (nb.dx === d.dx && nb.dy === d.dy) return false;
-      }
-      return true;
+  // Pass 2: 枝の途中からも再分岐（木構造のまま枝分かれを増やす）
+  let secondary = 0;
+  for (let round = 0; round < 4 && secondary < targetSecondary; round++) {
+    const origins = shuffle([...spurCells], rand);
+    for (const origin of origins) {
+      if (secondary >= targetSecondary) break;
+      // 行き止まり先端だけでなく、枝の中腹からも生やす
+      if (rand() < 0.35 && degreeAt(grid, n, origin.x, origin.y) >= 3) continue;
+      const chain = growOneSpur(grid, n, pathSet, origin, rand, {
+        forbidDirs: [],
+        nearMiss: rand() < 0.3,
+      });
+      if (!chain) continue;
+      for (const c of chain) spurCells.push(c);
+      secondary += 1;
+      made += 1;
+    }
+  }
+
+  // Pass 3: まだ空いている隣があれば短い枝を追加
+  const allPath = shuffle(
+    [...pathSet].map((k) => parseKey(k)).filter((p) => !(p.x === n - 2 && p.y === n - 2)),
+    rand,
+  );
+  for (const origin of allPath) {
+    if (made >= targetPrimary + targetSecondary + spine.length) break;
+    if (spineDir.has(key(origin.x, origin.y)) && rand() < 0.4) continue;
+    const chain = growOneSpur(grid, n, pathSet, origin, rand, {
+      forbidDirs: spineDir.get(key(origin.x, origin.y)) || [],
+      nearMiss: rand() < 0.25,
     });
-    if (!exits.length) continue;
-
-    const nearMiss = rand() < 0.4;
-    let started = false;
-    let cx;
-    let cy;
-    let pdx;
-    let pdy;
-
-    for (const first of exits) {
-      if (tryCarveLink(grid, origin.x, origin.y, first.x, first.y)) {
-        pathSet.add(key(first.x, first.y));
-        cx = first.x;
-        cy = first.y;
-        pdx = first.dx;
-        pdy = first.dy;
-        started = true;
-        break;
-      }
-    }
-    if (!started) continue;
-
-    const maxLen = nearMiss
-      ? 4 + Math.floor(rand() * Math.max(4, Math.floor(n / 5)))
-      : 6 + Math.floor(rand() * Math.max(8, Math.floor(n / 3)));
-    const stopNear = 2 + Math.floor(rand() * 3);
-
-    for (let step = 1; step < maxLen; step++) {
-      if (nearMiss && manhattan(cx, cy, gx, gy) <= stopNear) break;
-
-      const opts = shuffle(
-        oddNeighbors(n, cx, cy).filter((nb) => {
-          if (pathSet.has(key(nb.x, nb.y))) return false;
-          if (nb.x === gx && nb.y === gy) return false;
-          return true;
-        }),
-        rand,
-      );
-      if (!opts.length) break;
-
-      // 重み付きで試し、木を壊す候補はスキップ
-      const ranked = opts
-        .map((nb) => {
-          const before = manhattan(cx, cy, gx, gy);
-          const after = manhattan(nb.x, nb.y, gx, gy);
-          let w = 1;
-          if (nearMiss) w = after < before ? 5 : after === before ? 1.2 : 0.25;
-          else w = after > before ? 3.2 : after === before ? 1.4 : 0.5;
-          if (nb.dx === pdx && nb.dy === pdy) w *= 1.5;
-          w *= 0.85 + rand() * 0.3;
-          return { nb, w };
-        })
-        .sort((a, b) => b.w - a.w);
-
-      let advanced = false;
-      for (const { nb } of ranked) {
-        if (tryCarveLink(grid, cx, cy, nb.x, nb.y)) {
-          pathSet.add(key(nb.x, nb.y));
-          pdx = nb.dx;
-          pdy = nb.dy;
-          cx = nb.x;
-          cy = nb.y;
-          advanced = true;
-          break;
-        }
-      }
-      if (!advanced) break;
-    }
-
+    if (!chain) continue;
+    // 短くしたいので、長く伸びすぎた場合はそのまま（木ならOK）
     made += 1;
   }
 
@@ -679,12 +735,13 @@ export function generateMaze(size, seed = (Date.now() >>> 0)) {
     const spineBranches = countSpineBranches(grid, start, goal);
     const junctions = countJunctions(grid);
 
-    const score = spineBranches * 8 + branches * 3 + junctions + dist * 0.15;
+    const score = spineBranches * 10 + branches * 4 + junctions * 2 + dist * 0.1;
     if (score > bestScore) {
       bestScore = score;
       best = grid.map((row) => row.slice());
     }
-    if (spineBranches >= Math.max(5, Math.floor(n / 4))) break;
+    // 本線上の分岐が十分多く、全体の分岐も多い
+    if (spineBranches >= Math.max(10, Math.floor(n / 2.2)) && junctions >= spineBranches) break;
   }
 
   let grid = best;
