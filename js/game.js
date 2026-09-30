@@ -27,7 +27,12 @@ export const SINGLE_SIZE = 45;
 export const DEFAULT_ONLINE_SIZE = 55;
 export const LOCAL_VIEW = 5; // 5×5
 export const REVEAL_RADIUS = 1; // 3×3
-export const MOVE_COOLDOWN_MS = 110;
+/** 2手の最短間隔（ホスト検証・連打抑制） */
+export const MOVE_COOLDOWN_MS = 140;
+/** 押しっぱなしで2手目に入るまでの待ち */
+export const MOVE_REPEAT_DELAY_MS = 300;
+/** 2手目以降の連移間隔 */
+export const MOVE_REPEAT_RATE_MS = 160;
 
 /**
  * @param {{
