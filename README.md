@@ -50,3 +50,4 @@ node --test tests/*.test.mjs
 - 描画: Canvas 2D
 - 通信: [PeerJS](https://peerjs.com/)（WebRTC DataChannel、ホスト権威の状態同期）
 - 迷路: Randomized Prim（完璧迷路＝ループなし・スタート→ゴールは一意）。孤立壁なし
+- SE: Web Audio（移動・壁ヒット・クリア／開始・UI。参照 script.js と同系統）
