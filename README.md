@@ -49,4 +49,4 @@ node --test tests/*.test.mjs
 - 純フロントエンド（ES Modules）
 - 描画: Canvas 2D
 - 通信: [PeerJS](https://peerjs.com/)（WebRTC DataChannel、ホスト権威の状態同期）
-- 迷路: 決定的シード付き再帰バックトラッカー
+- 迷路: 決定的シード付き・直進バイアス付きバックトラッカー（長い分かれ道を優先）

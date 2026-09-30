@@ -15,19 +15,77 @@ export function mulberry32(seed) {
   };
 }
 
-function shuffle(arr, rand) {
-  const a = [...arr];
-  for (let i = a.length - 1; i > 0; i--) {
-    const j = Math.floor(rand() * (i + 1));
-    [a[i], a[j]] = [a[j], a[i]];
+const STEP_DIRS = [
+  [0, -2],
+  [0, 2],
+  [-2, 0],
+  [2, 0],
+];
+
+/** 直進しやすさ（高いほど長い廊下・分かれ道になる） */
+const STRAIGHT_BIAS = 0.82;
+/** 曲がり直後に最低このステップ数は直進を優先 */
+const MIN_RUN = 3;
+
+function inCarveBounds(n, x, y) {
+  return x > 0 && y > 0 && x < n - 1 && y < n - 1;
+}
+
+function unvisitedNeighbors(grid, n, x, y) {
+  const out = [];
+  for (const [dx, dy] of STEP_DIRS) {
+    const nx = x + dx;
+    const ny = y + dy;
+    if (inCarveBounds(n, nx, ny) && grid[ny][nx] === WALL) {
+      out.push({ dx, dy, nx, ny });
+    }
   }
-  return a;
+  return out;
+}
+
+/** その方向へ何ステップ壁が続くか（長い分かれ道候補の評価） */
+function openRunLength(grid, n, x, y, dx, dy) {
+  let len = 0;
+  let cx = x + dx;
+  let cy = y + dy;
+  while (inCarveBounds(n, cx, cy) && grid[cy][cx] === WALL) {
+    len += 1;
+    cx += dx;
+    cy += dy;
+  }
+  return len;
+}
+
+function pickNeighbor(grid, n, x, y, neighbors, ldx, ldy, runLen, rand) {
+  if (neighbors.length === 1) return neighbors[0];
+
+  const straight = neighbors.find((d) => d.dx === ldx && d.dy === ldy);
+  const forceStraight = runLen < MIN_RUN && !!straight;
+  if (straight && (forceStraight || rand() < STRAIGHT_BIAS)) {
+    return straight;
+  }
+
+  // 曲がるときは「まだ長く伸ばせる」方向を優先 → 長い分かれ道が増える
+  const turns = straight ? neighbors.filter((d) => d !== straight) : neighbors;
+  const pool = turns.length ? turns : neighbors;
+  let best = pool[0];
+  let bestScore = -1;
+  for (const cand of pool) {
+    const run = openRunLength(grid, n, x, y, cand.dx, cand.dy);
+    const score = run + rand() * 0.35;
+    if (score > bestScore) {
+      bestScore = score;
+      best = cand;
+    }
+  }
+  return best;
 }
 
 /**
  * 奇数サイズの迷路を生成。
  * スタートは左上 (0,0)、ゴールは右下 (size-1, size-1)。
  * 通路=0 / 壁=1。
+ * 直進バイアス＋長い空き方向への分岐で、長い分かれ道が多くなる。
  */
 export function generateMaze(size, seed = (Date.now() >>> 0)) {
   let n = Math.max(5, size | 0);
@@ -35,29 +93,27 @@ export function generateMaze(size, seed = (Date.now() >>> 0)) {
   const rand = mulberry32(seed);
   const grid = Array.from({ length: n }, () => Array(n).fill(WALL));
 
-  // 奇数列・奇数行を通路候補として掘る（外周は壁のまま）
-  const carve = (x, y) => {
-    grid[y][x] = PATH;
-    const dirs = shuffle(
-      [
-        [0, -2],
-        [0, 2],
-        [-2, 0],
-        [2, 0],
-      ],
-      rand,
-    );
-    for (const [dx, dy] of dirs) {
-      const nx = x + dx;
-      const ny = y + dy;
-      if (nx > 0 && ny > 0 && nx < n - 1 && ny < n - 1 && grid[ny][nx] === WALL) {
-        grid[y + dy / 2][x + dx / 2] = PATH;
-        carve(nx, ny);
-      }
-    }
-  };
+  // スタック式バックトラッカー（直進優先）
+  grid[1][1] = PATH;
+  const stack = [{ x: 1, y: 1, ldx: 0, ldy: 0, run: 0 }];
 
-  carve(1, 1);
+  while (stack.length) {
+    const cur = stack[stack.length - 1];
+    const { x, y, ldx, ldy, run } = cur;
+    const neighbors = unvisitedNeighbors(grid, n, x, y);
+
+    if (!neighbors.length) {
+      stack.pop();
+      continue;
+    }
+
+    const chosen = pickNeighbor(grid, n, x, y, neighbors, ldx, ldy, run, rand);
+    const { dx, dy, nx, ny } = chosen;
+    grid[y + dy / 2][x + dx / 2] = PATH;
+    grid[ny][nx] = PATH;
+    const nextRun = dx === ldx && dy === ldy ? run + 1 : 1;
+    stack.push({ x: nx, y: ny, ldx: dx, ldy: dy, run: nextRun });
+  }
 
   // 左上・右下を必ず通路にし、内部迷路へ接続
   grid[0][0] = PATH;
@@ -66,7 +122,6 @@ export function generateMaze(size, seed = (Date.now() >>> 0)) {
   grid[n - 1][n - 1] = PATH;
   grid[n - 1][n - 2] = PATH;
   grid[n - 2][n - 1] = PATH;
-  // (1,1) と角を繋ぐ
   grid[1][1] = PATH;
   grid[n - 2][n - 2] = PATH;
 
@@ -76,6 +131,98 @@ export function generateMaze(size, seed = (Date.now() >>> 0)) {
     grid,
     start: { x: 0, y: 0 },
     goal: { x: n - 1, y: n - 1 },
+  };
+}
+
+/**
+ * 分かれ道・廊下の長さ統計（テスト／調整用）
+ * - branchWays: 通路次数≥3 の分岐点から伸びる各枝の長さ
+ * - deadEndDepths: 行き止まりから分岐／端までの距離
+ */
+export function analyzeBranchiness(grid) {
+  const n = grid.length;
+  const ortho = [
+    [0, 1],
+    [0, -1],
+    [1, 0],
+    [-1, 0],
+  ];
+
+  const degree = (x, y) => {
+    let d = 0;
+    for (const [dx, dy] of ortho) {
+      const nx = x + dx;
+      const ny = y + dy;
+      if (nx < 0 || ny < 0 || nx >= n || ny >= n) continue;
+      if (grid[ny][nx] === PATH) d += 1;
+    }
+    return d;
+  };
+
+  const walkArm = (sx, sy, fromX, fromY) => {
+    let x = sx;
+    let y = sy;
+    let px = fromX;
+    let py = fromY;
+    let len = 1;
+    while (true) {
+      const deg = degree(x, y);
+      if (deg !== 2) break;
+      let next = null;
+      for (const [dx, dy] of ortho) {
+        const nx = x + dx;
+        const ny = y + dy;
+        if (nx < 0 || ny < 0 || nx >= n || ny >= n) continue;
+        if (grid[ny][nx] !== PATH) continue;
+        if (nx === px && ny === py) continue;
+        next = [nx, ny];
+        break;
+      }
+      if (!next) break;
+      px = x;
+      py = y;
+      x = next[0];
+      y = next[1];
+      len += 1;
+    }
+    return len;
+  };
+
+  const branchWays = [];
+  const deadEndDepths = [];
+
+  for (let y = 0; y < n; y++) {
+    for (let x = 0; x < n; x++) {
+      if (grid[y][x] !== PATH) continue;
+      const deg = degree(x, y);
+      if (deg >= 3) {
+        for (const [dx, dy] of ortho) {
+          const nx = x + dx;
+          const ny = y + dy;
+          if (nx < 0 || ny < 0 || nx >= n || ny >= n) continue;
+          if (grid[ny][nx] !== PATH) continue;
+          branchWays.push(walkArm(nx, ny, x, y));
+        }
+      } else if (deg === 1) {
+        for (const [dx, dy] of ortho) {
+          const nx = x + dx;
+          const ny = y + dy;
+          if (nx < 0 || ny < 0 || nx >= n || ny >= n) continue;
+          if (grid[ny][nx] !== PATH) continue;
+          deadEndDepths.push(walkArm(nx, ny, x, y) + 1);
+          break;
+        }
+      }
+    }
+  }
+
+  const avg = (arr) => (arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : 0);
+  return {
+    branchCount: branchWays.length,
+    avgBranchWay: avg(branchWays),
+    longBranchWays: branchWays.filter((l) => l >= 6).length,
+    avgDeadEndDepth: avg(deadEndDepths),
+    deadEndCount: deadEndDepths.length,
   };
 }
 

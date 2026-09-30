@@ -8,6 +8,7 @@ import {
   PATH,
   WALL,
   mulberry32,
+  analyzeBranchiness,
 } from '../js/maze.js';
 import {
   createGame,
@@ -78,6 +79,22 @@ describe('maze generation', () => {
     const vals = [r(), r(), r()];
     const r2 = mulberry32(123);
     assert.deepEqual([r2(), r2(), r2()], vals);
+  });
+
+  it('produces many long branch ways', () => {
+    const seeds = [1, 7, 42, 99, 1234];
+    let totalLong = 0;
+    let totalAvg = 0;
+    for (const seed of seeds) {
+      const m = generateMaze(45, seed);
+      const stats = analyzeBranchiness(m.grid);
+      assert.ok(stats.branchCount > 20, `branchCount ${stats.branchCount}`);
+      assert.ok(stats.avgBranchWay >= 3.5, `avgBranchWay ${stats.avgBranchWay}`);
+      totalLong += stats.longBranchWays;
+      totalAvg += stats.avgBranchWay;
+    }
+    assert.ok(totalLong >= 40, `longBranchWays sum ${totalLong}`);
+    assert.ok(totalAvg / seeds.length >= 4, `mean avgBranchWay ${totalAvg / seeds.length}`);
   });
 });
 
