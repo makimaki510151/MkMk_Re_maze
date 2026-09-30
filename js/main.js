@@ -115,14 +115,6 @@ function paintTitleMaze() {
       }
     }
   }
-  // accent trail
-  ctx.strokeStyle = 'rgba(232,93,76,0.55)';
-  ctx.lineWidth = cell * 1.2;
-  ctx.beginPath();
-  ctx.moveTo(cell * 0.5, cell * 0.5);
-  ctx.lineTo(cell * 8.5, cell * 0.5);
-  ctx.lineTo(cell * 8.5, cell * 14.5);
-  ctx.stroke();
 }
 
 /* ===== Screens ===== */

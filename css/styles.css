@@ -113,13 +113,6 @@ button:disabled { opacity: .42; cursor: default; }
   from { opacity: 0; transform: translateY(18px); }
   to { opacity: 1; transform: none; }
 }
-.brand-eyebrow {
-  font-size: 0.72rem;
-  letter-spacing: 0.28em;
-  color: var(--accent-2);
-  margin-bottom: 0.6rem;
-  font-weight: 700;
-}
 .brand-mark {
   font-family: var(--display);
   font-size: clamp(3rem, 12vw, 5.6rem);
